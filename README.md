@@ -1,86 +1,183 @@
-# Traffic AI left-lane review MVP
+# Traffic AI: contextual left-lane review MVP
 
-This Python application analyzes a prerecorded highway video and creates human-review candidates when a tracked vehicle stays in the configured leftmost lane longer than a configured threshold. It does **not** determine guilt, issue tickets, identify people, read plates, or contact enforcement systems.
+Traffic AI analyzes prerecorded highway video and creates explainable **human-review candidates** for prolonged left-lane use. Phase 2 adds motion history, stable lane changes, surrounding-traffic context, overtaking assessment, congestion suppression, and realistic right-lane opportunities.
+
+This is decision-support software. It does not determine a legal violation, identify a person, read license plates, issue tickets, or contact police systems. Every event remains `pending_human_review` with `enforcement_action: none`.
 
 ## Architecture
+
+```mermaid
+flowchart LR
+    V[FrameSource] --> D[YOLO Detector]
+    D --> T[ByteTrack Tracker]
+    T --> L[Lane Assigner]
+    L --> H[Lane-change Hysteresis]
+    H --> P[Road Position Estimator]
+    P --> C[Traffic Context]
+    C --> M[Bounded Motion History]
+    M --> O[Overtaking State Machine]
+    O --> R[Left-lane Decision Policy]
+    R --> E[Review Evidence Writer]
+    R --> A[Debug Annotator]
+```
 
 ```text
 traffic_ai/
   app/
-    main.py                       CLI, dependency composition
+    main.py                       CLI and dependency composition
     config.py                     validated YAML configuration
-    pipeline.py                   source-independent processing loop
-    detection/
-      base.py                     detector protocol
-      ultralytics_detector.py     YOLO frame detector
-    tracking/
-      base.py                     tracker protocol
-      bytetrack_tracker.py        persistent ByteTrack IDs
-    lanes/
-      assignment.py               polygon scaling and lane assignment
-    rules/
-      left_lane.py                configurable occupancy state machine
-    events/
-      writer.py                   review image, clip, and JSON artifacts
-    video/
-      protocols.py                replaceable frame-source/video-sink contracts
-      opencv_io.py                MP4 input and output
-      annotation.py               debug overlay
-    models/
-      domain.py                   records shared between stages
-  configs/default.yaml            example camera/lane configuration
-  input/                           local source videos (ignored by Git)
-  output/                          generated run folders (ignored by Git)
-  tests/                           model-independent unit tests
+    pipeline.py                   source-independent frame pipeline
+    detection/                    detector protocol + Ultralytics adapter
+    tracking/                     tracker protocol + ByteTrack adapter
+    lanes/                        polygon lane assignment
+    motion/                       bounded histories + lane hysteresis
+    positioning/                  replaceable road-position estimation
+    context/                      neighbors, congestion, right opportunities
+    overtaking/                   policy protocol + overtaking state machine
+    rules/                        occupancy lifecycle + decision policy
+    events/                       review images, clips, and JSON evidence
+    video/                        source/sink protocols + OpenCV adapters
+    models/                       shared typed domain records
+  configs/default.yaml
+  input/
+  output/
+  tests/
   requirements.txt
 ```
 
-The data flow is:
+Detection and tracking remain independent from traffic policy. `LeftLaneRuleEngine` receives only typed lane, history, context, and overtaking results; it never imports YOLO or ByteTrack. Future RTSP or drone sources can implement `FrameSource`, and a calibrated homography can replace `RoadPositionEstimator` without rewriting the rules.
+
+## Phase 2 algorithm
+
+For each frame the application:
+
+1. Detects vehicles and assigns persistent track IDs.
+2. Assigns each bottom-center road-contact point to a lane polygon.
+3. Applies time-and-frame hysteresis before accepting a lane change, preventing boundary jitter from producing repeated transitions.
+4. Maps the road-contact point to normalized road coordinates and estimates per-track longitudinal/lateral motion.
+5. Finds the nearest vehicles ahead and behind in the same lane and adjacent right lane.
+6. Stores those observations in a rolling history bounded by both seconds and sample count.
+7. Estimates traffic density and normalized motion to label traffic `free_flow`, `moderate`, `dense`, `stop_and_go`, or `unknown`.
+8. Tracks whether adequate front and rear space in the adjacent-right lane remains available for long enough.
+9. Advances a per-track overtaking state machine.
+10. Applies the contextual left-lane decision policy and emits only sufficiently supported review candidates.
+
+The overtaking states are:
 
 ```text
-OpenCV FrameSource
-  -> Ultralytics vehicle Detector
-  -> ByteTrack VehicleTracker
-  -> polygon LaneAssigner
-  -> LeftLaneRuleEngine
-  -> EventArtifactWriter + annotated VideoSink
+NONE -> ENTERED_LEFT -> PASSING -> PASSED_TARGET
+                                      |
+                                      +-> RETURNING_RIGHT -> COMPLETED
+
+Any incomplete/stale path may become ABORTED.
 ```
 
-Detection, tracking, geometry, and traffic policy communicate through small typed records. The rule engine never imports YOLO or ByteTrack. A later RTSP, drone, or message-queue input can implement `FrameSource` without changing lane/rule/event code.
+Strong overtaking evidence requires a confirmed move into the left lane near a vehicle ahead, followed by a reversal in their longitudinal ordering. Returning right adds completion evidence. Short related-track interruptions are tolerated; stale attempts expire.
 
-## Candidate semantics
+After a pass is confirmed, the suspicious-occupancy clock restarts at pass completion. If the driver remains left after the configured grace period while the right lane is available, a new candidate may eventually be created. One legitimate overtake never grants permanent immunity.
 
-For every persistent track, the rule engine measures video time from its first observation in the configured `left_lane_id`. At the threshold it starts a `left_lane_review_candidate` only when the mean detector confidence also meets the configured minimum.
+## Candidate and suppression policy
 
-The MVP uses `overtaking_clearance_mode: none`: it makes no claim about whether the vehicle was overtaking. Every saved record says:
+Duration alone is no longer enough in the application pipeline. A candidate requires:
 
-- `review_status: pending_human_review`
-- `human_review_required: true`
-- `enforcement_action: none`
-- `overtaking_assessment: not_implemented`
+- the left-lane occupancy threshold to be exceeded;
+- enough per-track history;
+- free-flow traffic with adequate context confidence;
+- no active or confirmed overtake;
+- a safe-looking adjacent-right gap persisting for the configured duration;
+- sufficient combined detector, traffic, right-gap, and overtaking evidence confidence.
 
-A candidate ends when the vehicle leaves the polygon, the track is absent past the grace period, or the video ends. `event_start_timestamp_seconds` is the original left-lane entry time; `candidate_created_timestamp_seconds` is when the threshold was reached. All timestamps are relative to the start of the source video.
+The classifier exposes:
 
-## Dependencies
+- `overtaking`
+- `likely_overtaking`
+- `congestion`
+- `temporary_left_lane_use`
+- `possible_left_lane_occupation`
+- `insufficient_evidence`
 
-- Python 3.11 or newer (3.11/3.12 are the safest choices for broad ML-wheel availability)
-- OpenCV for video decoding, encoding, and overlays
-- Ultralytics YOLO for vehicle detection
-- Supervision ByteTrack for persistent IDs
-- NumPy for array interchange
-- Pydantic v2 and PyYAML for strict configuration
-- pytest for tests
+Candidate reason codes are:
 
-The Supervision version is deliberately constrained below 0.28 because this MVP uses its documented `ByteTrack.update_with_detections` adapter. This keeps the dependency boundary explicit for a later migration to the separate `trackers` package.
+- `LEFT_LANE_DURATION_EXCEEDED`
+- `NO_ACTIVE_OVERTAKE`
+- `RIGHT_LANE_AVAILABLE`
+- `FREE_FLOW_TRAFFIC`
+
+Suppression reasons shown in rule status/debug video include:
+
+- `DURATION_BELOW_THRESHOLD`
+- `OVERTAKING_CONFIRMED`
+- `ACTIVE_OVERTAKE`
+- `CONGESTION`
+- `RIGHT_LANE_UNAVAILABLE`
+- `INSUFFICIENT_CONTEXT`
+- `LOW_EVIDENCE_CONFIDENCE`
+
+Uncertain context is intentionally classified as `insufficient_evidence` rather than promoted to a candidate.
+
+## Coordinate and distance limitations
+
+The initial `NormalizedImageRoadPositionEstimator` produces dimensionless values in the range 0-1. Longitudinal values increase in the configured direction of travel. Gap settings such as `0.08` are normalized image-space estimates, **not meters**.
+
+Perspective distortion means equal normalized gaps at the near and far ends of an image do not represent equal physical distances. Do not interpret current motion as speed or gaps as real-world following distance. A future calibrated homography/world-coordinate estimator can implement the existing interface and label its output `calibrated_world`.
+
+## Configuration
+
+Edit [configs/default.yaml](configs/default.yaml) for every camera. The included polygons are illustrative. Lane entries must be ordered from left to right in the observed direction of travel, because that order defines the adjacent-right lane.
+
+Key Phase 2 settings:
+
+```yaml
+road_position:
+  mode: normalized_image
+  travel_direction: toward_top
+
+traffic_context:
+  history_seconds: 12.0
+  minimum_history_seconds: 2.0
+  maximum_samples_per_track: 900
+
+lane_change:
+  confirmation_seconds: 0.4
+  minimum_frames: 3
+
+overtaking:
+  enabled: true
+  observation_window_seconds: 10.0
+  completion_timeout_seconds: 15.0
+  minimum_confidence: 0.65
+  entry_target_max_gap_normalized: 0.20
+  pass_order_margin_normalized: 0.01
+  post_overtake_grace_seconds: 2.0
+
+congestion:
+  dense_vehicle_count_per_lane: 3
+  dense_density_ratio: 0.80
+  stop_and_go_max_motion_per_second_normalized: 0.015
+
+right_lane_opportunity:
+  minimum_available_seconds: 3.0
+  front_gap_normalized: 0.08
+  rear_gap_normalized: 0.06
+
+rules:
+  left_lane:
+    occupancy_threshold_seconds: 8.0
+    minimum_evidence_confidence: 0.65
+    overtaking_clearance_mode: contextual
+    policy_version: "2.0"
+```
+
+All thresholds are validated by Pydantic. Older configurations without Phase 2 sections continue with defaults. The legacy value `overtaking_clearance_mode: none` is accepted, but contextual application decisions then treat overtaking as unassessed and suppress candidates as insufficient evidence.
 
 ## Setup
 
-From the `traffic_ai` directory, create and activate a virtual environment.
+Python 3.11 or newer is required. From the repository root:
 
 PowerShell:
 
 ```powershell
-py -3.11 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -89,43 +186,23 @@ python -m pip install -r requirements.txt
 macOS/Linux:
 
 ```bash
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The first run with a model name such as `yolo11n.pt` lets Ultralytics download those weights. A local weights path can be supplied with `--model`.
-
-## Configure lanes
-
-Edit `configs/default.yaml` before evaluating results. The included polygons are illustrative and will not match an arbitrary camera.
-
-With `coordinate_space: normalized`, every point is `[x / frame_width, y / frame_height]` in the range 0–1. Each polygon should cover one visible lane. Vehicle membership uses the bottom-center point of its bounding box, which approximates the tire/road contact location. Exactly one polygon must have `leftmost: true`, and `rules.left_lane.left_lane_id` must reference it.
-
-Important rule settings:
-
-```yaml
-rules:
-  left_lane:
-    left_lane_id: left
-    occupancy_threshold_seconds: 8.0
-    track_lost_grace_seconds: 1.0
-    minimum_mean_confidence: 0.25
-    overtaking_clearance_mode: none
-```
-
-Use the annotated output video to iteratively align the polygons with the road. The meaning of “leftmost” depends on traffic direction and jurisdiction; configuration must be reviewed for each camera.
+The first use of a model name such as `yolo11n.pt` may download model weights. Supply a local model with `--model` when required.
 
 ## Run
 
-Place a video at `input/highway.mp4`, then run:
+Calibrate `configs/default.yaml`, then analyze an MP4:
 
 ```powershell
 python -m app.main --config configs/default.yaml --input input/highway.mp4
 ```
 
-Or specify all common overrides:
+Common overrides:
 
 ```powershell
 python -m app.main `
@@ -136,17 +213,9 @@ python -m app.main `
   --device cpu
 ```
 
-For an NVIDIA CUDA device supported by the installed PyTorch build, use `--device 0`.
+For a CUDA device supported by the installed PyTorch build, use `--device 0`.
 
-Run the tests with:
-
-```powershell
-python -m pytest -q
-```
-
-## Output
-
-Each execution creates a timestamped directory:
+## Output and evidence
 
 ```text
 output/highway_YYYYMMDD_HHMMSS/
@@ -159,39 +228,66 @@ output/highway_YYYYMMDD_HHMMSS/
       event.mp4
 ```
 
-`annotated.mp4` shows lane polygons, boxes, IDs, class, current lane, left-lane duration, and `REVIEW` candidate state. A candidate clip contains configured pre-event context and is capped by `clip_max_duration_seconds`. `events.jsonl` is an index of finalized records; the authoritative per-event record is `metadata.json` beside its media.
+The debug video shows vehicle ID, stable lane, left-lane duration, overtake state, right-gap duration, candidate/suppression state, overall traffic state, and a subtle line to a related overtaken track when visible.
 
-Example metadata:
+Phase 2 keeps all Phase 1 metadata fields and adds:
 
 ```json
 {
-  "schema_version": "1.0",
-  "event_id": "left_lane_track_17_0000012500",
   "event_type": "left_lane_review_candidate",
   "review_status": "pending_human_review",
   "human_review_required": true,
   "enforcement_action": "none",
-  "track_id": 17,
-  "event_start_timestamp_seconds": 12.5,
-  "candidate_created_timestamp_seconds": 20.5,
-  "event_end_timestamp_seconds": 25.1,
-  "duration_seconds": 12.6,
-  "lane_id": "left",
-  "confidence_score": 0.87,
-  "source_video_name": "highway.mp4",
-  "representative_frame": "representative.jpg",
-  "event_video_clip": "event.mp4",
-  "end_reason": "left_lane_exit",
-  "overtaking_assessment": "not_implemented"
+  "policy_version": "2.0",
+  "behavior_classification": "possible_left_lane_occupation",
+  "evidence_confidence_score": 0.79,
+  "traffic_context": {
+    "congestion_level": "free_flow",
+    "traffic_density": 0.31,
+    "nearby_vehicle_count": 3,
+    "right_lane_available": true,
+    "right_lane_available_seconds": 4.7,
+    "coordinate_system": "normalized_image",
+    "calibrated": false,
+    "confidence": 0.82
+  },
+  "overtaking_assessment": {
+    "status": "not_overtaking",
+    "state": "NONE",
+    "confidence": 0.78,
+    "evidence": ["no_active_overtaking_sequence_detected"],
+    "related_track_ids": []
+  },
+  "review_reason_codes": [
+    "LEFT_LANE_DURATION_EXCEEDED",
+    "NO_ACTIVE_OVERTAKE",
+    "RIGHT_LANE_AVAILABLE",
+    "FREE_FLOW_TRAFFIC"
+  ]
 }
 ```
 
-## MVP limitations and next interfaces
+The metadata contains track-level technical evidence only and no personal identity data.
 
-- Lane geometry is static. Camera movement or drone footage will require stabilization or per-frame homography before lane assignment.
-- Occlusion, shadows, small distant vehicles, and tracker ID switches can affect durations.
-- No speed, traffic-density, vehicle-relative positioning, or definite overtaking logic is implemented.
-- No license-plate recognition, facial recognition, identity lookup, police API, or automatic enforcement exists.
-- Model and lane calibration must be validated on representative local footage before operational use.
+## Test and lint
 
-Likely next modules are a calibrated perspective mapper, an overtaking evidence policy injected through `OvertakingClearancePolicy`, and an RTSP implementation of `FrameSource`. Those additions do not require rewriting the current traffic-rule state machine.
+The test suite is model-independent and does not download YOLO weights:
+
+```powershell
+python -m pytest -q
+python -m ruff check app tests
+python -m ruff format --check app tests
+```
+
+It covers lane hysteresis, boundary jitter, overtaking suppression, free-right-lane candidates, dense traffic, blocked right lanes, temporary tracker loss, return-right completion, post-overtake renewed occupancy, and metadata serialization.
+
+## Remaining limitations
+
+- Static lane polygons assume a fixed camera; moving drone footage needs stabilization.
+- Normalized image positions are perspective-distorted and cannot provide meters or physical speed.
+- Tracker ID switches or long occlusion can break an overtaking relationship.
+- Congestion and gap thresholds require site-specific validation.
+- Only the immediately adjacent-right lane is evaluated.
+- The logic does not understand road signs, temporary closures, emergency maneuvers, weather, or jurisdiction-specific exceptions.
+- Detection absence is not proof that a lane is empty; human reviewers must inspect the saved evidence.
+- No automatic enforcement, identity recognition, or legal determination is implemented.

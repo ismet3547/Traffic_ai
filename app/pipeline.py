@@ -5,9 +5,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import Detector
 from app.events import EventArtifactWriter
 from app.lanes import LaneAssigner
+from app.motion import LaneTransitionDetector, MotionHistoryStore
+from app.overtaking import OvertakingClearancePolicy
+from app.positioning import RoadPositionEstimator
 from app.rules import LeftLaneRuleEngine
 from app.tracking import VehicleTracker
 from app.video.annotation import DebugAnnotator
@@ -30,6 +34,12 @@ class TrafficAnalysisPipeline:
         detector: Detector,
         tracker: VehicleTracker,
         lane_assigner: LaneAssigner,
+        lane_transition_detector: LaneTransitionDetector,
+        road_position_estimator: RoadPositionEstimator,
+        motion_history: MotionHistoryStore,
+        traffic_context_analyzer: TrafficContextAnalyzer,
+        right_lane_opportunities: RightLaneOpportunityTracker,
+        overtaking_policy: OvertakingClearancePolicy,
         rule_engine: LeftLaneRuleEngine,
         event_writer: EventArtifactWriter,
         annotator: DebugAnnotator,
@@ -39,6 +49,12 @@ class TrafficAnalysisPipeline:
         self._detector = detector
         self._tracker = tracker
         self._lane_assigner = lane_assigner
+        self._lane_transition_detector = lane_transition_detector
+        self._road_position_estimator = road_position_estimator
+        self._motion_history = motion_history
+        self._traffic_context_analyzer = traffic_context_analyzer
+        self._right_lane_opportunities = right_lane_opportunities
+        self._overtaking_policy = overtaking_policy
         self._rule_engine = rule_engine
         self._event_writer = event_writer
         self._annotator = annotator
@@ -51,16 +67,61 @@ class TrafficAnalysisPipeline:
             for packet in self._source:
                 detections = self._detector.detect(packet.image)
                 vehicles = self._tracker.update(detections)
-                observations = self._lane_assigner.assign(
+                raw_observations = self._lane_assigner.assign(
                     vehicles,
                     frame_width=self._source.info.width,
                     frame_height=self._source.info.height,
                 )
+                lane_frame = self._lane_transition_detector.update(
+                    raw_observations, packet.timestamp_seconds
+                )
+                observations = lane_frame.observations
+                positions = self._road_position_estimator.estimate(
+                    observations,
+                    frame_width=self._source.info.width,
+                    frame_height=self._source.info.height,
+                )
+                traffic_context = self._traffic_context_analyzer.analyze(
+                    packet.timestamp_seconds,
+                    observations,
+                    positions,
+                    self._motion_history,
+                )
+                traffic_context = self._right_lane_opportunities.update(
+                    traffic_context, packet.timestamp_seconds
+                )
+                self._motion_history.update(
+                    frame_index=packet.index,
+                    timestamp_seconds=packet.timestamp_seconds,
+                    observations=observations,
+                    positions=positions,
+                    vehicle_contexts=traffic_context.vehicles,
+                    transitions=lane_frame.transitions,
+                )
+                overtaking_assessments = self._overtaking_policy.update(
+                    timestamp_seconds=packet.timestamp_seconds,
+                    observations=observations,
+                    transitions=lane_frame.transitions,
+                    context=traffic_context,
+                    history=self._motion_history,
+                )
                 evaluation = self._rule_engine.evaluate(
-                    observations, packet.timestamp_seconds
+                    observations,
+                    packet.timestamp_seconds,
+                    traffic_context=traffic_context,
+                    overtaking_assessments=overtaking_assessments,
+                    history_durations={
+                        observation.vehicle.track_id: self._motion_history.duration_seconds(
+                            observation.vehicle.track_id
+                        )
+                        for observation in observations
+                    },
                 )
                 annotated = self._annotator.annotate(
-                    packet.image, observations, evaluation.statuses
+                    packet.image,
+                    observations,
+                    evaluation.statuses,
+                    traffic_context=traffic_context,
                 )
                 self._event_writer.process_frame(annotated, evaluation.transitions)
                 if self._debug_sink is not None:

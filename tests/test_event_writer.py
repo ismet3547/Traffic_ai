@@ -8,7 +8,17 @@ import numpy as np
 from app.config import OutputConfig
 from app.events import writer as writer_module
 from app.events.writer import EventArtifactWriter
-from app.models import CandidateTransition, VideoInfo
+from app.models import (
+    CandidateTransition,
+    CongestionLevel,
+    GlobalTrafficContext,
+    NeighborVehicles,
+    OvertakeState,
+    OvertakingAssessment,
+    OvertakingStatus,
+    VehicleTrafficContext,
+    VideoInfo,
+)
 
 
 class _FakeVideoWriter:
@@ -57,6 +67,30 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
         source_video_name="source.mp4",
     )
     frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    traffic = GlobalTrafficContext(
+        congestion_level=CongestionLevel.FREE_FLOW,
+        traffic_density=0.2,
+        active_vehicle_count=2,
+        lane_vehicle_counts={"left": 1, "right": 1},
+        average_normalized_motion_per_second=0.05,
+        confidence=0.8,
+    )
+    vehicle_context = VehicleTrafficContext(
+        track_id=4,
+        neighbors=NeighborVehicles(),
+        nearby_vehicle_count=1,
+        adjacent_right_lane_id="right",
+        right_lane_available=True,
+        right_lane_available_seconds=2.2,
+        right_lane_confidence=0.8,
+    )
+    overtaking = OvertakingAssessment(
+        track_id=4,
+        status=OvertakingStatus.NOT_OVERTAKING,
+        state=OvertakeState.NONE,
+        confidence=0.78,
+        evidence=("no_active_overtaking_sequence_detected",),
+    )
     artifact_writer.process_frame(frame, [])
     artifact_writer.process_frame(
         frame,
@@ -69,6 +103,16 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
                 timestamp_seconds=3.0,
                 duration_seconds=2.0,
                 confidence_score=0.8,
+                review_reason_codes=(
+                    "LEFT_LANE_DURATION_EXCEEDED",
+                    "RIGHT_LANE_AVAILABLE",
+                ),
+                policy_version="2.0",
+                traffic_context=traffic,
+                vehicle_traffic_context=vehicle_context,
+                overtaking_assessment=overtaking,
+                behavior_classification="possible_left_lane_occupation",
+                evidence_confidence_score=0.79,
             )
         ],
     )
@@ -98,4 +142,14 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
     assert metadata["enforcement_action"] == "none"
     assert metadata["duration_seconds"] == 3.0
     assert metadata["end_reason"] == "left_lane_exit"
+    assert metadata["policy_version"] == "2.0"
+    assert metadata["behavior_classification"] == "possible_left_lane_occupation"
+    assert metadata["evidence_confidence_score"] == 0.79
+    assert metadata["traffic_context"]["congestion_level"] == "free_flow"
+    assert metadata["traffic_context"]["right_lane_available_seconds"] == 2.2
+    assert metadata["overtaking_assessment"]["status"] == "not_overtaking"
+    assert metadata["review_reason_codes"] == [
+        "LEFT_LANE_DURATION_EXCEEDED",
+        "RIGHT_LANE_AVAILABLE",
+    ]
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1

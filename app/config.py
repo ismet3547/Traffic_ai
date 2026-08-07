@@ -46,21 +46,99 @@ class LanesConfig(StrictModel):
     lanes: list[LaneConfig] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_lanes(self) -> "LanesConfig":
+    def validate_lanes(self) -> LanesConfig:
         ids = [lane.id for lane in self.lanes]
         if len(ids) != len(set(ids)):
             raise ValueError("lane IDs must be unique")
         if sum(lane.leftmost for lane in self.lanes) != 1:
             raise ValueError("exactly one lane must have leftmost: true")
+        if not self.lanes[0].leftmost:
+            raise ValueError("lanes must be ordered left-to-right, with leftmost first")
         if self.coordinate_space == "normalized":
             for lane in self.lanes:
                 if any(not (0 <= x <= 1 and 0 <= y <= 1) for x, y in lane.polygon):
-                    raise ValueError("normalized lane coordinates must be between 0 and 1")
+                    raise ValueError(
+                        "normalized lane coordinates must be between 0 and 1"
+                    )
         return self
 
     @property
     def leftmost_lane_id(self) -> str:
         return next(lane.id for lane in self.lanes if lane.leftmost)
+
+    @property
+    def lane_ids_left_to_right(self) -> list[str]:
+        """Lane IDs in configured left-to-right order."""
+
+        return [lane.id for lane in self.lanes]
+
+
+class TrafficContextConfig(StrictModel):
+    history_seconds: float = Field(default=12.0, gt=0)
+    minimum_history_seconds: float = Field(default=2.0, ge=0)
+    maximum_samples_per_track: int = Field(default=900, ge=2)
+    nearby_longitudinal_window_normalized: float = Field(default=0.25, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_history_window(self) -> TrafficContextConfig:
+        if self.minimum_history_seconds > self.history_seconds:
+            raise ValueError("minimum history cannot exceed the history window")
+        return self
+
+
+class LaneChangeConfig(StrictModel):
+    confirmation_seconds: float = Field(default=0.4, ge=0)
+    minimum_frames: int = Field(default=3, ge=1)
+    state_ttl_seconds: float = Field(default=2.0, gt=0)
+
+
+class RoadPositionConfig(StrictModel):
+    mode: Literal["normalized_image"] = "normalized_image"
+    travel_direction: Literal["toward_top", "toward_bottom"] = "toward_top"
+
+
+class OvertakingConfig(StrictModel):
+    enabled: bool = True
+    observation_window_seconds: float = Field(default=10.0, gt=0)
+    completion_timeout_seconds: float = Field(default=15.0, gt=0)
+    minimum_confidence: float = Field(default=0.65, ge=0, le=1)
+    entry_target_max_gap_normalized: float = Field(default=0.20, gt=0, le=1)
+    pass_order_margin_normalized: float = Field(default=0.01, ge=0, le=0.25)
+    post_overtake_grace_seconds: float = Field(default=2.0, ge=0)
+    related_track_lost_grace_seconds: float = Field(default=1.0, ge=0)
+
+
+class CongestionConfig(StrictModel):
+    enabled: bool = True
+    minimum_observed_vehicles: int = Field(default=1, ge=1)
+    dense_vehicle_count_per_lane: int = Field(default=3, ge=1)
+    moderate_density_ratio: float = Field(default=0.45, ge=0, le=1)
+    dense_density_ratio: float = Field(default=0.80, ge=0, le=1)
+    stop_and_go_max_motion_per_second_normalized: float = Field(
+        default=0.015, ge=0, le=1
+    )
+    dense_max_motion_per_second_normalized: float = Field(default=0.04, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_density_thresholds(self) -> CongestionConfig:
+        if self.moderate_density_ratio > self.dense_density_ratio:
+            raise ValueError("moderate density ratio cannot exceed dense density ratio")
+        if (
+            self.stop_and_go_max_motion_per_second_normalized
+            > self.dense_max_motion_per_second_normalized
+        ):
+            raise ValueError(
+                "stop-and-go motion threshold cannot exceed dense threshold"
+            )
+        return self
+
+
+class RightLaneOpportunityConfig(StrictModel):
+    minimum_available_seconds: float = Field(default=3.0, ge=0)
+    front_gap_normalized: float = Field(default=0.08, gt=0, le=1)
+    rear_gap_normalized: float = Field(default=0.06, gt=0, le=1)
+    minimum_confidence: float = Field(default=0.60, ge=0, le=1)
+    state_ttl_seconds: float = Field(default=2.0, gt=0)
 
 
 class LeftLaneRuleConfig(StrictModel):
@@ -69,7 +147,9 @@ class LeftLaneRuleConfig(StrictModel):
     occupancy_threshold_seconds: float = Field(default=8.0, gt=0)
     track_lost_grace_seconds: float = Field(default=1.0, ge=0)
     minimum_mean_confidence: float = Field(default=0.25, ge=0, le=1)
-    overtaking_clearance_mode: Literal["none"] = "none"
+    minimum_evidence_confidence: float = Field(default=0.65, ge=0, le=1)
+    overtaking_clearance_mode: Literal["none", "contextual"] = "contextual"
+    policy_version: str = Field(default="2.0", min_length=1)
 
 
 class RulesConfig(StrictModel):
@@ -86,11 +166,13 @@ class OutputConfig(StrictModel):
     clip_max_duration_seconds: float = Field(default=12.0, gt=0)
 
     @model_validator(mode="after")
-    def validate_codec(self) -> "OutputConfig":
+    def validate_codec(self) -> OutputConfig:
         if len(self.codec) != 4:
             raise ValueError("output codec must be a four-character FourCC code")
         if self.clip_pre_event_seconds >= self.clip_max_duration_seconds:
-            raise ValueError("clip_pre_event_seconds must be shorter than the maximum clip")
+            raise ValueError(
+                "clip_pre_event_seconds must be shorter than the maximum clip"
+            )
         return self
 
 
@@ -99,11 +181,19 @@ class AppConfig(StrictModel):
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     lanes: LanesConfig
+    road_position: RoadPositionConfig = Field(default_factory=RoadPositionConfig)
+    traffic_context: TrafficContextConfig = Field(default_factory=TrafficContextConfig)
+    lane_change: LaneChangeConfig = Field(default_factory=LaneChangeConfig)
+    overtaking: OvertakingConfig = Field(default_factory=OvertakingConfig)
+    congestion: CongestionConfig = Field(default_factory=CongestionConfig)
+    right_lane_opportunity: RightLaneOpportunityConfig = Field(
+        default_factory=RightLaneOpportunityConfig
+    )
     rules: RulesConfig = Field(default_factory=RulesConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="after")
-    def validate_cross_references(self) -> "AppConfig":
+    def validate_cross_references(self) -> AppConfig:
         lane_ids = {lane.id for lane in self.lanes.lanes}
         rule_lane = self.rules.left_lane.left_lane_id
         if rule_lane not in lane_ids:

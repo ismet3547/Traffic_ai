@@ -1,29 +1,33 @@
-"""Configurable state machine for left-lane review candidates."""
+"""Stateful left-lane occupancy lifecycle with injected decision policy."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal
 
 from app.config import LeftLaneRuleConfig
 from app.models import (
+    BehaviorClassification,
+    CandidateDecision,
     CandidateTransition,
     LaneObservation,
+    OvertakeState,
+    OvertakingAssessment,
+    OvertakingStatus,
     RuleEvaluation,
+    TrafficFrameContext,
     VehicleRuleStatus,
+    VehicleTrafficContext,
 )
-
-
-class OvertakingClearancePolicy(Protocol):
-    def is_cleared(self, observation: LaneObservation, timestamp_seconds: float) -> bool:
-        """Return true only when definite overtaking evidence clears a candidate."""
-        ...
+from app.rules.policy import ContextualLeftLaneDecisionPolicy
 
 
 class NoOvertakingClearancePolicy:
-    """MVP policy: no overtaking inference is attempted."""
+    """Deprecated Phase 1 compatibility shim."""
 
-    def is_cleared(self, observation: LaneObservation, timestamp_seconds: float) -> bool:
+    def is_cleared(
+        self, observation: LaneObservation, timestamp_seconds: float
+    ) -> bool:
         return False
 
 
@@ -34,7 +38,10 @@ class _LeftLaneState:
     confidence_sum: float
     observation_count: int
     candidate_active: bool = False
-    cleared: bool = False
+    last_overtake_completed_at: float | None = None
+    last_decision: CandidateDecision | None = None
+    latest_context: TrafficFrameContext | None = None
+    latest_assessment: OvertakingAssessment | None = None
 
     @property
     def mean_confidence(self) -> float:
@@ -45,43 +52,53 @@ class LeftLaneRuleEngine:
     def __init__(
         self,
         config: LeftLaneRuleConfig,
-        clearance_policy: OvertakingClearancePolicy | None = None,
+        decision_policy: ContextualLeftLaneDecisionPolicy | None = None,
     ) -> None:
         self._config = config
-        self._clearance_policy = clearance_policy or NoOvertakingClearancePolicy()
+        self._decision_policy = decision_policy
         self._states: dict[int, _LeftLaneState] = {}
 
     def evaluate(
-        self, observations: list[LaneObservation], timestamp_seconds: float
+        self,
+        observations: list[LaneObservation],
+        timestamp_seconds: float,
+        traffic_context: TrafficFrameContext | None = None,
+        overtaking_assessments: dict[int, OvertakingAssessment] | None = None,
+        history_durations: dict[int, float] | None = None,
     ) -> RuleEvaluation:
         statuses: dict[int, VehicleRuleStatus] = {}
         transitions: list[CandidateTransition] = []
         seen_ids = {observation.vehicle.track_id for observation in observations}
+        assessments = overtaking_assessments or {}
+        durations = history_durations or {}
 
         if not self._config.enabled:
-            for observation in observations:
-                statuses[observation.vehicle.track_id] = VehicleRuleStatus(
-                    track_id=observation.vehicle.track_id,
-                    lane_id=observation.lane_id,
-                    left_lane_duration_seconds=0.0,
-                    is_review_candidate=False,
-                )
             self._states.clear()
-            return RuleEvaluation(statuses=statuses, transitions=[])
+            for observation in observations:
+                statuses[observation.vehicle.track_id] = self._status_outside(
+                    observation,
+                    assessments.get(observation.vehicle.track_id),
+                    traffic_context,
+                )
+            return RuleEvaluation(
+                statuses=statuses,
+                transitions=[],
+                traffic_context=(
+                    traffic_context.global_context if traffic_context else None
+                ),
+            )
 
         for observation in observations:
             track_id = observation.vehicle.track_id
+            assessment = assessments.get(track_id)
             if observation.lane_id != self._config.left_lane_id:
                 transition = self._end_state(
                     track_id, timestamp_seconds, "left_lane_exit"
                 )
                 if transition:
                     transitions.append(transition)
-                statuses[track_id] = VehicleRuleStatus(
-                    track_id=track_id,
-                    lane_id=observation.lane_id,
-                    left_lane_duration_seconds=0.0,
-                    is_review_candidate=False,
+                statuses[track_id] = self._status_outside(
+                    observation, assessment, traffic_context
                 )
                 continue
 
@@ -99,42 +116,45 @@ class LeftLaneRuleEngine:
                 state.confidence_sum += observation.vehicle.confidence
                 state.observation_count += 1
 
-            duration = max(0.0, timestamp_seconds - state.entered_at)
-            clears_candidate = self._clearance_policy.is_cleared(
-                observation, timestamp_seconds
-            )
-            if clears_candidate:
-                state.cleared = True
+            state.latest_context = traffic_context
+            state.latest_assessment = assessment
             if (
-                not state.candidate_active
-                and not state.cleared
-                and duration >= self._config.occupancy_threshold_seconds
-                and state.mean_confidence >= self._config.minimum_mean_confidence
+                assessment is not None
+                and assessment.status == OvertakingStatus.OVERTAKING_CONFIRMED
+                and assessment.completed_at is not None
+                and assessment.completed_at != state.last_overtake_completed_at
             ):
+                if state.candidate_active:
+                    transition = self._end_candidate_without_removing_state(
+                        track_id,
+                        state,
+                        timestamp_seconds,
+                        "overtaking_confirmed",
+                    )
+                    transitions.append(transition)
+                state.entered_at = assessment.completed_at
+                state.confidence_sum = observation.vehicle.confidence
+                state.observation_count = 1
+                state.last_overtake_completed_at = assessment.completed_at
+
+            duration = max(0.0, timestamp_seconds - state.entered_at)
+            vehicle_context = (
+                traffic_context.vehicles.get(track_id) if traffic_context else None
+            )
+            decision = self._decide(
+                duration,
+                state.mean_confidence,
+                durations.get(track_id, 0.0),
+                traffic_context,
+                vehicle_context,
+                assessment,
+            )
+            state.last_decision = decision
+            if decision.eligible and not state.candidate_active:
                 state.candidate_active = True
                 transitions.append(
-                    CandidateTransition(
-                        transition="started",
-                        track_id=track_id,
-                        lane_id=self._config.left_lane_id,
-                        start_timestamp_seconds=state.entered_at,
-                        timestamp_seconds=timestamp_seconds,
-                        duration_seconds=duration,
-                        confidence_score=state.mean_confidence,
-                    )
-                )
-            elif state.candidate_active and clears_candidate:
-                state.candidate_active = False
-                transitions.append(
-                    CandidateTransition(
-                        transition="ended",
-                        track_id=track_id,
-                        lane_id=self._config.left_lane_id,
-                        start_timestamp_seconds=state.entered_at,
-                        timestamp_seconds=timestamp_seconds,
-                        duration_seconds=duration,
-                        confidence_score=state.mean_confidence,
-                        end_reason="definite_overtaking",
+                    self._transition(
+                        "started", track_id, state, timestamp_seconds, duration
                     )
                 )
 
@@ -143,19 +163,49 @@ class LeftLaneRuleEngine:
                 lane_id=observation.lane_id,
                 left_lane_duration_seconds=duration,
                 is_review_candidate=state.candidate_active,
+                behavior_classification=(
+                    BehaviorClassification.POSSIBLE_LEFT_LANE_OCCUPATION.value
+                    if state.candidate_active
+                    else decision.classification.value
+                ),
+                suppression_reason=(
+                    None if state.candidate_active else decision.suppression_reason
+                ),
+                overtake_state=(
+                    assessment.state.value if assessment else OvertakeState.NONE.value
+                ),
+                overtaking_status=(
+                    assessment.status.value
+                    if assessment
+                    else OvertakingStatus.NOT_ASSESSED.value
+                ),
+                right_lane_available_seconds=(
+                    vehicle_context.right_lane_available_seconds
+                    if vehicle_context
+                    else 0.0
+                ),
+                evidence_confidence=decision.evidence_confidence,
+                related_track_ids=(assessment.related_track_ids if assessment else ()),
             )
 
         for track_id, state in list(self._states.items()):
             if track_id in seen_ids:
                 continue
-            if timestamp_seconds - state.last_seen_at >= self._config.track_lost_grace_seconds:
-                transition = self._end_state(
-                    track_id, state.last_seen_at, "track_lost"
-                )
+            if (
+                timestamp_seconds - state.last_seen_at
+                >= self._config.track_lost_grace_seconds
+            ):
+                transition = self._end_state(track_id, state.last_seen_at, "track_lost")
                 if transition:
                     transitions.append(transition)
 
-        return RuleEvaluation(statuses=statuses, transitions=transitions)
+        return RuleEvaluation(
+            statuses=statuses,
+            transitions=transitions,
+            traffic_context=(
+                traffic_context.global_context if traffic_context else None
+            ),
+        )
 
     def finalize(self) -> list[CandidateTransition]:
         transitions: list[CandidateTransition] = []
@@ -165,20 +215,138 @@ class LeftLaneRuleEngine:
                 transitions.append(transition)
         return transitions
 
-    def _end_state(
-        self, track_id: int, timestamp_seconds: float, reason: str
-    ) -> CandidateTransition | None:
-        state = self._states.pop(track_id, None)
-        if state is None or not state.candidate_active:
-            return None
-        duration = max(0.0, timestamp_seconds - state.entered_at)
+    def _decide(
+        self,
+        duration: float,
+        mean_confidence: float,
+        history_duration: float,
+        traffic_context: TrafficFrameContext | None,
+        vehicle_context: VehicleTrafficContext | None,
+        assessment: OvertakingAssessment | None,
+    ) -> CandidateDecision:
+        if self._decision_policy is not None:
+            return self._decision_policy.decide(
+                left_lane_duration_seconds=duration,
+                mean_detector_confidence=mean_confidence,
+                history_duration_seconds=history_duration,
+                traffic=(traffic_context.global_context if traffic_context else None),
+                vehicle_context=vehicle_context,
+                overtaking=assessment,
+            )
+        eligible = (
+            duration >= self._config.occupancy_threshold_seconds
+            and mean_confidence >= self._config.minimum_mean_confidence
+        )
+        return CandidateDecision(
+            eligible=eligible,
+            classification=(
+                BehaviorClassification.POSSIBLE_LEFT_LANE_OCCUPATION
+                if eligible
+                else BehaviorClassification.TEMPORARY_LEFT_LANE_USE
+            ),
+            evidence_confidence=mean_confidence,
+            reason_codes=("LEFT_LANE_DURATION_EXCEEDED",) if eligible else (),
+            suppression_reason=(None if eligible else "DURATION_BELOW_THRESHOLD"),
+        )
+
+    def _transition(
+        self,
+        kind: Literal["started", "ended"],
+        track_id: int,
+        state: _LeftLaneState,
+        timestamp_seconds: float,
+        duration: float,
+        end_reason: str | None = None,
+    ) -> CandidateTransition:
+        frame_context = state.latest_context
         return CandidateTransition(
-            transition="ended",
+            transition=kind,
             track_id=track_id,
             lane_id=self._config.left_lane_id,
             start_timestamp_seconds=state.entered_at,
             timestamp_seconds=timestamp_seconds,
             duration_seconds=duration,
             confidence_score=state.mean_confidence,
-            end_reason=reason,
+            end_reason=end_reason,
+            review_reason_codes=(
+                state.last_decision.reason_codes if state.last_decision else ()
+            ),
+            policy_version=self._config.policy_version,
+            traffic_context=(frame_context.global_context if frame_context else None),
+            vehicle_traffic_context=(
+                frame_context.vehicles.get(track_id) if frame_context else None
+            ),
+            overtaking_assessment=state.latest_assessment,
+            behavior_classification=(
+                state.last_decision.classification.value
+                if state.last_decision
+                else None
+            ),
+            evidence_confidence_score=(
+                state.last_decision.evidence_confidence if state.last_decision else None
+            ),
+        )
+
+    def _end_candidate_without_removing_state(
+        self,
+        track_id: int,
+        state: _LeftLaneState,
+        timestamp_seconds: float,
+        reason: str,
+    ) -> CandidateTransition:
+        state.candidate_active = False
+        return self._transition(
+            "ended",
+            track_id,
+            state,
+            timestamp_seconds,
+            max(0.0, timestamp_seconds - state.entered_at),
+            reason,
+        )
+
+    def _end_state(
+        self, track_id: int, timestamp_seconds: float, reason: str
+    ) -> CandidateTransition | None:
+        state = self._states.pop(track_id, None)
+        if state is None or not state.candidate_active:
+            return None
+        state.candidate_active = False
+        return self._transition(
+            "ended",
+            track_id,
+            state,
+            timestamp_seconds,
+            max(0.0, timestamp_seconds - state.entered_at),
+            reason,
+        )
+
+    @staticmethod
+    def _status_outside(
+        observation: LaneObservation,
+        assessment: OvertakingAssessment | None,
+        traffic_context: TrafficFrameContext | None,
+    ) -> VehicleRuleStatus:
+        vehicle_context = (
+            traffic_context.vehicles.get(observation.vehicle.track_id)
+            if traffic_context
+            else None
+        )
+        return VehicleRuleStatus(
+            track_id=observation.vehicle.track_id,
+            lane_id=observation.lane_id,
+            left_lane_duration_seconds=0.0,
+            is_review_candidate=False,
+            behavior_classification=BehaviorClassification.TEMPORARY_LEFT_LANE_USE.value,
+            overtake_state=(
+                assessment.state.value if assessment else OvertakeState.NONE.value
+            ),
+            overtaking_status=(
+                assessment.status.value
+                if assessment
+                else OvertakingStatus.NOT_ASSESSED.value
+            ),
+            right_lane_available_seconds=(
+                vehicle_context.right_lane_available_seconds if vehicle_context else 0.0
+            ),
+            related_track_ids=(assessment.related_track_ids if assessment else ()),
         )

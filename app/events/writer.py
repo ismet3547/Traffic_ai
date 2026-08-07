@@ -7,11 +7,18 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
 from app.config import OutputConfig
-from app.models import CandidateTransition, EventMetadata, VideoInfo
+from app.models import (
+    CandidateTransition,
+    EventMetadata,
+    OvertakingAssessmentMetadata,
+    TrafficContextMetadata,
+    VideoInfo,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +56,9 @@ class EventArtifactWriter:
         self._config = output_config
         self._video_info = video_info
         self._source_video_name = source_video_name
-        pre_event_frames = max(0, round(output_config.clip_pre_event_seconds * video_info.fps))
+        pre_event_frames = max(
+            0, round(output_config.clip_pre_event_seconds * video_info.fps)
+        )
         self._prebuffer: deque[np.ndarray] = deque(maxlen=pre_event_frames)
         self._active: dict[int, _Recording] = {}
         self._completed_count = 0
@@ -105,7 +114,10 @@ class EventArtifactWriter:
         event_directory.mkdir(parents=True, exist_ok=False)
         image_path = event_directory / "representative.jpg"
         clip_path = event_directory / "event.mp4"
-        image_params = [cv2.IMWRITE_JPEG_QUALITY, self._config.representative_image_quality]
+        image_params = [
+            cv2.IMWRITE_JPEG_QUALITY,
+            self._config.representative_image_quality,
+        ]
         if not cv2.imwrite(str(image_path), frame, image_params):
             raise RuntimeError(f"could not write representative image: {image_path}")
 
@@ -130,8 +142,16 @@ class EventArtifactWriter:
             source_video_name=self._source_video_name,
             representative_frame=image_path.name,
             event_video_clip=clip_path.name,
+            behavior_classification=transition.behavior_classification,
+            evidence_confidence_score=transition.evidence_confidence_score,
+            review_reason_codes=list(transition.review_reason_codes),
+            policy_version=transition.policy_version,
+            traffic_context=_traffic_context_metadata(transition),
+            overtaking_assessment=_overtaking_metadata(transition),
         )
-        recording = _Recording(metadata=metadata, directory=event_directory, writer=writer)
+        recording = _Recording(
+            metadata=metadata, directory=event_directory, writer=writer
+        )
         self._active[transition.track_id] = recording
         for buffered_frame in self._prebuffer:
             self._write_clip_frame(recording, buffered_frame)
@@ -156,6 +176,10 @@ class EventArtifactWriter:
         recording.metadata.duration_seconds = transition.duration_seconds
         recording.metadata.confidence_score = transition.confidence_score
         recording.metadata.end_reason = transition.end_reason
+        if transition.traffic_context is not None:
+            recording.metadata.traffic_context = _traffic_context_metadata(transition)
+        if transition.overtaking_assessment is not None:
+            recording.metadata.overtaking_assessment = _overtaking_metadata(transition)
         self._write_metadata(recording)
         with self._index_path.open("a", encoding="utf-8") as index:
             index.write(recording.metadata.model_dump_json() + "\n")
@@ -173,3 +197,47 @@ class EventArtifactWriter:
                 ensure_ascii=False,
             )
             stream.write("\n")
+
+
+def _traffic_context_metadata(
+    transition: CandidateTransition,
+) -> TrafficContextMetadata | None:
+    traffic = transition.traffic_context
+    vehicle = transition.vehicle_traffic_context
+    if traffic is None:
+        return None
+    return TrafficContextMetadata(
+        congestion_level=traffic.congestion_level.value,
+        traffic_density=traffic.traffic_density,
+        nearby_vehicle_count=(vehicle.nearby_vehicle_count if vehicle else 0),
+        active_vehicle_count=traffic.active_vehicle_count,
+        lane_vehicle_counts=traffic.lane_vehicle_counts,
+        average_normalized_motion_per_second=(
+            traffic.average_normalized_motion_per_second
+        ),
+        right_lane_available=(vehicle.right_lane_available if vehicle else None),
+        right_lane_available_seconds=(
+            vehicle.right_lane_available_seconds if vehicle else 0.0
+        ),
+        right_lane_confidence=(vehicle.right_lane_confidence if vehicle else 0.0),
+        coordinate_system=traffic.coordinate_system,
+        calibrated=(traffic.coordinate_system == "calibrated_world"),
+        confidence=traffic.confidence,
+    )
+
+
+def _overtaking_metadata(
+    transition: CandidateTransition,
+) -> OvertakingAssessmentMetadata | Literal["not_implemented"]:
+    assessment = transition.overtaking_assessment
+    if assessment is None:
+        return "not_implemented"
+    return OvertakingAssessmentMetadata(
+        status=assessment.status.value,
+        state=assessment.state.value,
+        confidence=assessment.confidence,
+        evidence=list(assessment.evidence),
+        related_track_ids=list(assessment.related_track_ids),
+        started_at=assessment.started_at,
+        completed_at=assessment.completed_at,
+    )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from app.lanes import LaneAssigner
-from app.models import LaneObservation, VehicleRuleStatus
+from app.models import LaneObservation, TrafficFrameContext, VehicleRuleStatus
 
 
 class DebugAnnotator:
@@ -24,6 +24,7 @@ class DebugAnnotator:
         frame: np.ndarray,
         observations: list[LaneObservation],
         statuses: dict[int, VehicleRuleStatus],
+        traffic_context: TrafficFrameContext | None = None,
     ) -> np.ndarray:
         cv2 = self._cv2
         output = frame.copy()
@@ -33,7 +34,11 @@ class DebugAnnotator:
 
         for lane_id, points in polygons.items():
             polygon = np.asarray(points, dtype=np.int32)
-            color = (80, 120, 255) if lane_id == self._lane_assigner.leftmost_lane_id else (80, 220, 160)
+            color = (
+                (80, 120, 255)
+                if lane_id == self._lane_assigner.leftmost_lane_id
+                else (80, 220, 160)
+            )
             cv2.fillPoly(overlay, [polygon], color)
             cv2.polylines(output, [polygon], True, color, 2, cv2.LINE_AA)
             centroid = polygon.mean(axis=0).astype(int)
@@ -49,6 +54,18 @@ class DebugAnnotator:
             )
         output = cv2.addWeighted(overlay, 0.14, output, 0.86, 0)
 
+        if traffic_context is not None:
+            traffic = traffic_context.global_context
+            traffic_label = (
+                f"TRAFFIC: {traffic.congestion_level.value.upper()}  "
+                f"DENSITY: {traffic.traffic_density:.2f}  "
+                f"COORDS: {traffic.coordinate_system.upper()}"
+            )
+            self._label(output, traffic_label, (10, 24), (55, 55, 55))
+
+        observation_by_track = {
+            observation.vehicle.track_id: observation for observation in observations
+        }
         for observation in observations:
             vehicle = observation.vehicle
             status = statuses.get(vehicle.track_id)
@@ -63,13 +80,45 @@ class DebugAnnotator:
             cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
             duration = status.left_lane_duration_seconds if status else 0.0
             lane = observation.lane_id or "outside"
-            marker = " REVIEW" if candidate else ""
-            label = (
-                f"#{vehicle.track_id} {vehicle.class_name} "
-                f"lane={lane} left={duration:.1f}s{marker}"
+            decision = (
+                "REVIEW"
+                if candidate
+                else (
+                    f"SUP:{status.suppression_reason}"
+                    if status and status.suppression_reason
+                    else status.behavior_classification
+                    if status
+                    else ""
+                )
             )
-            self._label(output, label, (x1, max(18, y1)), color)
+            overtake = status.overtake_state if status else "NONE"
+            right_gap = status.right_lane_available_seconds if status else 0.0
+            labels = [
+                f"#{vehicle.track_id} {vehicle.class_name} {lane.upper()} {duration:.1f}s",
+                f"OVERTAKE:{overtake} RIGHT GAP:{right_gap:.1f}s {decision}",
+            ]
+            self._labels(output, labels, (x1, max(34, y1)), color)
+
+            if status and status.related_track_ids:
+                related = observation_by_track.get(status.related_track_ids[0])
+                if related is not None:
+                    start = tuple(int(value) for value in vehicle.bbox.bottom_center)
+                    end = tuple(
+                        int(value) for value in related.vehicle.bbox.bottom_center
+                    )
+                    cv2.line(output, start, end, (220, 180, 60), 1, cv2.LINE_AA)
         return output
+
+    def _labels(
+        self,
+        image: np.ndarray,
+        lines: list[str],
+        origin: tuple[int, int],
+        color: tuple[int, int, int],
+    ) -> None:
+        x, y = origin
+        for offset, line in enumerate(reversed(lines)):
+            self._label(image, line, (x, y - offset * 18), color)
 
     def _label(
         self,

@@ -47,9 +47,7 @@ def test_candidate_starts_at_threshold_and_ends_on_lane_exit() -> None:
 
 
 def test_short_occupancy_does_not_create_candidate() -> None:
-    engine = LeftLaneRuleEngine(
-        LeftLaneRuleConfig(occupancy_threshold_seconds=5.0)
-    )
+    engine = LeftLaneRuleEngine(LeftLaneRuleConfig(occupancy_threshold_seconds=5.0))
     engine.evaluate([_observation()], 0.0)
     result = engine.evaluate([_observation(lane_id="center")], 4.9)
 

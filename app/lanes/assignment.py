@@ -60,7 +60,11 @@ def _point_in_polygon(point: Point, polygon: Sequence[Point]) -> bool:
         x1, y1 = previous
         x2, y2 = current
         cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
-        if abs(cross) < 1e-7 and min(x1, x2) <= x <= max(x1, x2) and min(y1, y2) <= y <= max(y1, y2):
+        if (
+            abs(cross) < 1e-7
+            and min(x1, x2) <= x <= max(x1, x2)
+            and min(y1, y2) <= y <= max(y1, y2)
+        ):
             return True
         if (y1 > y) != (y2 > y):
             intersection_x = (x2 - x1) * (y - y1) / (y2 - y1) + x1

@@ -32,17 +32,14 @@ class ByteTrackVehicleTracker:
         if detections:
             sv_detections = self._sv.Detections(
                 xyxy=np.asarray(
-                    [
-                        [d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2]
-                        for d in detections
-                    ],
+                    [[d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2] for d in detections],
                     dtype=np.float32,
                 ),
-                confidence=np.asarray([d.confidence for d in detections], dtype=np.float32),
+                confidence=np.asarray(
+                    [d.confidence for d in detections], dtype=np.float32
+                ),
                 class_id=np.asarray([d.class_id for d in detections], dtype=int),
-                data={
-                    "class_name": np.asarray([d.class_name for d in detections])
-                },
+                data={"class_name": np.asarray([d.class_name for d in detections])},
             )
         else:
             sv_detections = self._sv.Detections(
@@ -62,16 +59,16 @@ class ByteTrackVehicleTracker:
             if tracker_id is None:
                 continue
             coords = tracked.xyxy[index]
-            class_id = int(tracked.class_id[index]) if tracked.class_id is not None else -1
+            class_id = (
+                int(tracked.class_id[index]) if tracked.class_id is not None else -1
+            )
             confidence = (
                 float(tracked.confidence[index])
                 if tracked.confidence is not None
                 else 0.0
             )
             class_name = (
-                str(class_names[index])
-                if class_names is not None
-                else str(class_id)
+                str(class_names[index]) if class_names is not None else str(class_id)
             )
             vehicles.append(
                 TrackedVehicle(

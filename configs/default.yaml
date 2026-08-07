@@ -19,6 +19,7 @@ tracker:
 lanes:
   coordinate_space: normalized
   assignment_anchor: bottom_center
+  # Lane list order is left-to-right in the observed direction of travel.
   # Example polygons only. Calibrate these to the actual camera view.
   # Points are [x / frame_width, y / frame_height].
   lanes:
@@ -45,6 +46,49 @@ lanes:
         - [0.61, 0.43]
         - [0.55, 0.43]
 
+# The default mapper uses dimensionless image coordinates, not meters.
+road_position:
+  mode: normalized_image
+  # Longitudinal progress increases toward the top of this example image.
+  travel_direction: toward_top
+
+traffic_context:
+  history_seconds: 12.0
+  minimum_history_seconds: 2.0
+  maximum_samples_per_track: 900
+  nearby_longitudinal_window_normalized: 0.25
+
+lane_change:
+  confirmation_seconds: 0.4
+  minimum_frames: 3
+  state_ttl_seconds: 2.0
+
+overtaking:
+  enabled: true
+  observation_window_seconds: 10.0
+  completion_timeout_seconds: 15.0
+  minimum_confidence: 0.65
+  entry_target_max_gap_normalized: 0.20
+  pass_order_margin_normalized: 0.01
+  post_overtake_grace_seconds: 2.0
+  related_track_lost_grace_seconds: 1.0
+
+congestion:
+  enabled: true
+  minimum_observed_vehicles: 1
+  dense_vehicle_count_per_lane: 3
+  moderate_density_ratio: 0.45
+  dense_density_ratio: 0.80
+  stop_and_go_max_motion_per_second_normalized: 0.015
+  dense_max_motion_per_second_normalized: 0.04
+
+right_lane_opportunity:
+  minimum_available_seconds: 3.0
+  front_gap_normalized: 0.08
+  rear_gap_normalized: 0.06
+  minimum_confidence: 0.60
+  state_ttl_seconds: 2.0
+
 rules:
   left_lane:
     enabled: true
@@ -52,8 +96,9 @@ rules:
     occupancy_threshold_seconds: 8.0
     track_lost_grace_seconds: 1.0
     minimum_mean_confidence: 0.25
-    # MVP intentionally makes no overtaking claim.
-    overtaking_clearance_mode: none
+    minimum_evidence_confidence: 0.65
+    overtaking_clearance_mode: contextual
+    policy_version: "2.0"
 
 output:
   directory: output

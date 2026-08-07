@@ -6,7 +6,9 @@ from app.models import BoundingBox, TrackedVehicle
 def _vehicle(track_id: int, bottom_center_x: float, bottom_y: float) -> TrackedVehicle:
     return TrackedVehicle(
         track_id=track_id,
-        bbox=BoundingBox(bottom_center_x - 5, bottom_y - 10, bottom_center_x + 5, bottom_y),
+        bbox=BoundingBox(
+            bottom_center_x - 5, bottom_y - 10, bottom_center_x + 5, bottom_y
+        ),
         confidence=0.9,
         class_id=2,
         class_name="car",

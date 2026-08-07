@@ -35,40 +35,56 @@ class GeometryIntegrityPolicy:
         frame = resolve_frame_geometry(
             frame_width, frame_height, self._lanes, self._config
         )
-        pose_status = camera_pose.status if camera_pose is not None else "unavailable"
+        pose_status = (
+            camera_pose.status.lower() if camera_pose is not None else "unavailable"
+        )
         pose_confidence = camera_pose.confidence if camera_pose is not None else 0.0
         reasons = list(frame.reason_codes)
 
         external = self._config.external_fixed_camera_guarantee
+        pose_trusted = False
+        external_used = False
+        trust_source = "none"
         if not self._config.enabled:
-            trust_source = "gate_disabled_by_configuration"
-            pose_trusted = True
-            reasons.append("GEOMETRY_GATE_DISABLED")
-        elif external:
-            trust_source = "external_deployment_guarantee"
-            pose_trusted = True
-            reasons.append("EXTERNAL_FIXED_CAMERA_GUARANTEE")
-        else:
-            trust_source = "measured_camera_pose"
-            pose_trusted = (
-                pose_status == "stable"
-                and pose_confidence >= self._config.minimum_pose_confidence
-            )
-            if pose_status == "unavailable":
-                reasons.append("CAMERA_POSE_UNAVAILABLE")
-            elif pose_status == "uncertain":
-                reasons.append("CAMERA_POSE_UNCERTAIN")
-            elif pose_status == "moved":
-                reasons.append("CAMERA_POSE_MOVED")
-            elif pose_confidence < self._config.minimum_pose_confidence:
-                reasons.append("CAMERA_POSE_CONFIDENCE_LOW")
+            reasons.append("GEOMETRY_GATE_DISABLED_FAIL_CLOSED")
+
+        # Positive runtime failure evidence always outranks an operational
+        # guarantee; the guarantee may fill only an unavailable-evidence gap.
+        if pose_status == "moved":
+            reasons.append("CAMERA_POSE_CHANGED")
             if camera_pose is not None:
                 reasons.extend(camera_pose.reason_codes)
+        elif pose_status == "uncertain":
+            reasons.append("CAMERA_POSE_UNCERTAIN")
+            if camera_pose is not None:
+                reasons.extend(camera_pose.reason_codes)
+        elif pose_status == "stable":
+            trust_source = "runtime_pose_validation"
+            pose_trusted = pose_confidence >= self._config.minimum_pose_confidence
+            if not pose_trusted:
+                reasons.append("CAMERA_POSE_CONFIDENCE_LOW")
+        elif pose_status == "unavailable" and external:
+            trust_source = "external_deployment_guarantee"
+            pose_trusted = True
+            external_used = True
+            reasons.append("EXTERNAL_FIXED_CAMERA_GUARANTEE_USED")
+        else:
+            if pose_status == "unavailable":
+                reasons.append("CAMERA_POSE_UNVERIFIED")
+            else:
+                reasons.append("CAMERA_POSE_STATUS_UNRECOGNIZED")
+            if camera_pose is not None:
+                reasons.extend(camera_pose.reason_codes)
+
+        if not self._config.enabled:
+            pose_trusted = False
+            external_used = False
+            trust_source = "none"
 
         geometry_allowed = frame.compatible and pose_trusted
         if geometry_allowed:
             status = GeometryIntegrityStatus.TRUSTED
-            confidence = 0.85 if external else min(1.0, pose_confidence)
+            confidence = 0.85 if external_used else min(1.0, pose_confidence)
         elif not frame.compatible or pose_status == "moved":
             status = GeometryIntegrityStatus.INVALID
             confidence = 0.0

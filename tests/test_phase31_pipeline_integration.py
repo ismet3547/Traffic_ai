@@ -222,6 +222,8 @@ def _run(
     overtake: list[OvertakingStatus] | None = None,
     capture_only: bool = False,
     motion_estimator=None,
+    geometry_config: GeometryIntegrityConfig | None = None,
+    lifecycle_config: CandidateLifecycleConfig | None = None,
 ):
     source = _Source(len(xs))
     lanes = _lanes()
@@ -244,7 +246,8 @@ def _run(
             ContextualLeftLaneDecisionPolicy(
                 rule_config, context_config, opportunity_config, calibration
             ),
-            CandidateLifecycleConfig(
+            lifecycle_config
+            or CandidateLifecycleConfig(
                 invalidation_grace_seconds=0.0,
                 evidence_settle_seconds=0.2,
                 track_loss_close_seconds=0.2,
@@ -293,7 +296,7 @@ def _run(
         annotator=_Annotator(),  # type: ignore[arg-type]
         debug_sink=None,
         geometry_integrity_policy=GeometryIntegrityPolicy(
-            GeometryIntegrityConfig(), lanes
+            geometry_config or GeometryIntegrityConfig(), lanes
         ),
     )
     summary = pipeline.run()

@@ -498,7 +498,7 @@ def _camera_pose_metadata(
         verification_mode=(
             "runtime_background_diagnostic"
             if transition.geometry_integrity is not None
-            and transition.geometry_integrity.trust_source == "measured_camera_pose"
+            and transition.geometry_integrity.trust_source == "runtime_pose_validation"
             else transition.geometry_integrity.trust_source
             if transition.geometry_integrity is not None
             else "unavailable"

@@ -73,6 +73,8 @@ geometry_integrity:
 
 An external guarantee means the camera mount is operationally controlled and cannot change without recalibration. It is an operational assumption, not a software measurement; metadata reports `trust_source: external_deployment_guarantee`. See `configs/demo_fixed_camera.yaml`. Exact resolution is accepted; a same-aspect uniform resize is accepted only in `uniform` mode. Aspect changes and unsupported resizing/cropping fail closed.
 
+An external fixed-camera guarantee is used only when runtime camera-pose verification is unavailable. It never overrides measured evidence of camera movement, scale drift, rotation, translation, or projective change.
+
 ## Candidate lifecycle
 
 ```text

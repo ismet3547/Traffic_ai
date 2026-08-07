@@ -193,6 +193,8 @@ def test_pose_unavailable_disables_candidates_by_default() -> None:
     )
     assert assessment.status == GeometryIntegrityStatus.UNVERIFIED
     assert not assessment.candidate_generation_allowed
+    assert assessment.trust_source == "none"
+    assert "CAMERA_POSE_UNVERIFIED" in assessment.reason_codes
 
 
 def test_external_fixed_camera_guarantee_is_explicit_escape_hatch() -> None:
@@ -206,6 +208,74 @@ def test_external_fixed_camera_guarantee_is_explicit_escape_hatch() -> None:
     assert assessment.status == GeometryIntegrityStatus.TRUSTED
     assert assessment.lane_assignment_allowed
     assert assessment.trust_source == "external_deployment_guarantee"
+    assert "EXTERNAL_FIXED_CAMERA_GUARANTEE_USED" in assessment.reason_codes
+
+
+def test_stable_runtime_pose_outranks_external_guarantee() -> None:
+    assessment = _external_policy().evaluate(100, 50, _pose(), _permission(True))
+    assert assessment.status == GeometryIntegrityStatus.TRUSTED
+    assert assessment.trust_source == "runtime_pose_validation"
+    assert "EXTERNAL_FIXED_CAMERA_GUARANTEE_USED" not in assessment.reason_codes
+
+
+def test_uncertain_runtime_pose_cannot_be_overridden_by_external_guarantee() -> None:
+    assessment = _external_policy().evaluate(
+        100,
+        50,
+        _pose("uncertain"),
+        _permission(True),
+    )
+    assert assessment.status == GeometryIntegrityStatus.DEGRADED
+    assert assessment.trust_source == "none"
+    assert not assessment.candidate_generation_allowed
+    assert not assessment.physical_measurements_allowed
+    assert not assessment.world_relationships_allowed
+    assert not assessment.physical_speed_allowed
+    assert not assessment.physical_gaps_allowed
+    assert "CAMERA_POSE_UNCERTAIN" in assessment.reason_codes
+
+
+def test_moved_runtime_pose_cannot_be_overridden_by_external_guarantee() -> None:
+    assessment = _external_policy().evaluate(
+        100,
+        50,
+        _pose("moved"),
+        _permission(True),
+    )
+    assert assessment.status == GeometryIntegrityStatus.INVALID
+    assert assessment.trust_source == "none"
+    assert not assessment.candidate_generation_allowed
+    assert not assessment.physical_measurements_allowed
+    assert not assessment.world_relationships_allowed
+    assert not assessment.physical_speed_allowed
+    assert not assessment.physical_gaps_allowed
+    assert "CAMERA_POSE_CHANGED" in assessment.reason_codes
+
+
+def test_scale_change_cannot_be_overridden_by_external_guarantee() -> None:
+    changed_pose = _pose_validator().update(0.0, _motion(scale=1.02))
+    assessment = _external_policy().evaluate(100, 50, changed_pose, _permission(True))
+    assert assessment.status == GeometryIntegrityStatus.INVALID
+    assert assessment.trust_source == "none"
+    assert "CAMERA_SCALE_CHANGED" in assessment.reason_codes
+    assert not assessment.physical_measurements_allowed
+
+
+def test_projective_drift_cannot_be_overridden_by_external_guarantee() -> None:
+    diagnostic = ProjectivePoseEstimate(
+        valid=True,
+        drift_score=0.02,
+        reprojection_error_pixels=0.2,
+        inlier_ratio=0.9,
+        confidence=0.9,
+        method="synthetic_reference_homography",
+    )
+    changed_pose = _pose_validator().update(0.0, _motion(projective=diagnostic))
+    assessment = _external_policy().evaluate(100, 50, changed_pose, _permission(True))
+    assert assessment.status == GeometryIntegrityStatus.INVALID
+    assert assessment.trust_source == "none"
+    assert "PROJECTIVE_DRIFT_DETECTED" in assessment.reason_codes
+    assert not assessment.physical_measurements_allowed
 
 
 def test_camera_move_invalidates_previously_trusted_lane_geometry() -> None:
@@ -214,6 +284,7 @@ def test_camera_move_invalidates_previously_trusted_lane_geometry() -> None:
     moved = policy.evaluate(100, 50, _pose("moved"), _permission())
     assert moved.status == GeometryIntegrityStatus.INVALID
     assert not moved.lane_geometry.trusted
+    assert moved.trust_source == "none"
 
 
 def test_invalid_lane_geometry_returns_unavailable_lane() -> None:
@@ -339,6 +410,16 @@ def _eligible() -> CandidateDecision:
         BehaviorClassification.POSSIBLE_LEFT_LANE_OCCUPATION,
         0.9,
         ("LEFT_LANE_DURATION_EXCEEDED",),
+    )
+
+
+def _external_policy() -> GeometryIntegrityPolicy:
+    return GeometryIntegrityPolicy(
+        GeometryIntegrityConfig(
+            external_fixed_camera_guarantee=True,
+            external_guarantee_id="controlled-tripod-7",
+        ),
+        _lanes(),
     )
 
 

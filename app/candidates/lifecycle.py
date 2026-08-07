@@ -22,6 +22,7 @@ _HARD_INVALIDATIONS = {
     "CALIBRATION_UNRELIABLE",
     "CAMERA_MOTION_HIGH",
     "UNSTABLE_TRACK",
+    "GEOMETRY_INTEGRITY_LOST",
 }
 
 
@@ -146,6 +147,26 @@ class CandidateLifecycleManager:
             return self._snapshot(record, None)
 
         if record.state == CandidateLifecycleState.PENDING_CLOSE:
+            if decision.suppression_reason == "GEOMETRY_INTEGRITY_LOST":
+                if record.invalid_since is None:
+                    record.invalid_since = timestamp_seconds
+                    record.invalid_reason = "GEOMETRY_INTEGRITY_LOST"
+                    record.suspended_at = timestamp_seconds
+                    self._append(
+                        record,
+                        timestamp_seconds,
+                        "candidate_suspended",
+                        ("GEOMETRY_INTEGRITY_LOST",),
+                    )
+                    return self._snapshot(record, "suspended")
+                if (
+                    timestamp_seconds - record.invalid_since + 1e-9
+                    >= self._config.invalidation_grace_seconds
+                ):
+                    return self._cancel(
+                        record, timestamp_seconds, "GEOMETRY_INTEGRITY_LOST"
+                    )
+                return self._snapshot(record, None)
             if decision.suppression_reason == "OVERTAKING_CONFIRMED":
                 return self._cancel(record, timestamp_seconds, "OVERTAKING_CONFIRMED")
             close_at = (

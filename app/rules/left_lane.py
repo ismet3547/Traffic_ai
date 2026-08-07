@@ -121,6 +121,42 @@ class LeftLaneRuleEngine:
                     assessment,
                     durations,
                 )
+                geometry = (
+                    traffic_context.global_context.geometry_integrity
+                    if traffic_context
+                    else None
+                )
+                if geometry is not None and not geometry.lane_assignment_allowed:
+                    state.last_decision = decision
+                    if self._lifecycle.state(track_id) in {
+                        CandidateLifecycleState.IDLE,
+                        CandidateLifecycleState.ACCUMULATING,
+                    }:
+                        # Unverified time cannot contribute to a later left-lane
+                        # duration finding after geometry recovers.
+                        state.entered_at = timestamp_seconds
+                        state.confidence_sum = observation.vehicle.confidence
+                        state.observation_count = 1
+                    lifecycle = self._lifecycle.update(
+                        track_id, timestamp_seconds, decision
+                    )
+                    if lifecycle.transition is not None:
+                        transitions.append(
+                            self._transition(
+                                lifecycle,
+                                track_id,
+                                state,
+                                timestamp_seconds,
+                                timestamp_seconds - state.entered_at,
+                            )
+                        )
+                    statuses[track_id] = self._status(
+                        observation, state, lifecycle.state, decision
+                    )
+                    if lifecycle.state == CandidateLifecycleState.CANCELLED:
+                        self._states.pop(track_id, None)
+                        self._lifecycle.remove(track_id)
+                    continue
                 if (
                     state.last_decision is not None
                     and state.last_decision.eligible
@@ -489,6 +525,9 @@ class LeftLaneRuleEngine:
             camera_motion=global_context.camera_motion if global_context else None,
             camera_pose=global_context.camera_pose if global_context else None,
             physical_measurements=permission,
+            geometry_integrity=global_context.geometry_integrity
+            if global_context
+            else None,
         )
 
     def _status(
@@ -581,6 +620,18 @@ class LeftLaneRuleEngine:
             physical_measurement_reason_codes=permission.reason_codes
             if permission
             else (),
+            geometry_integrity_status=(
+                frame_context.global_context.geometry_integrity.status.value
+                if frame_context
+                and frame_context.global_context.geometry_integrity is not None
+                else "unverified"
+            ),
+            geometry_reason_codes=(
+                frame_context.global_context.geometry_integrity.reason_codes
+                if frame_context
+                and frame_context.global_context.geometry_integrity is not None
+                else ()
+            ),
         )
 
     @staticmethod
@@ -620,4 +671,16 @@ class LeftLaneRuleEngine:
             coordinate_mode=position.coordinate_mode
             if position
             else "normalized_image",
+            geometry_integrity_status=(
+                traffic_context.global_context.geometry_integrity.status.value
+                if traffic_context
+                and traffic_context.global_context.geometry_integrity is not None
+                else "unverified"
+            ),
+            geometry_reason_codes=(
+                traffic_context.global_context.geometry_integrity.reason_codes
+                if traffic_context
+                and traffic_context.global_context.geometry_integrity is not None
+                else ()
+            ),
         )

@@ -10,6 +10,7 @@ from app.config import (
     CameraPoseValidationConfig,
     CandidateLifecycleConfig,
     CongestionConfig,
+    GeometryIntegrityConfig,
     LaneChangeConfig,
     LaneConfig,
     LanesConfig,
@@ -21,6 +22,7 @@ from app.config import (
     TrafficContextConfig,
 )
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
+from app.geometry import GeometryIntegrityPolicy
 from app.lanes import LaneAssigner
 from app.models import (
     BoundingBox,
@@ -179,6 +181,9 @@ class _CapturingRule:
 
 def _lanes() -> LanesConfig:
     return LanesConfig(
+        reference_width=100,
+        reference_height=100,
+        reference_pose_id="synthetic_fixed_pose",
         lanes=[
             LaneConfig(
                 id="left",
@@ -189,7 +194,7 @@ def _lanes() -> LanesConfig:
             LaneConfig(
                 id="right", label="Right", polygon=[(0.5, 0), (1, 0), (1, 1), (0.5, 1)]
             ),
-        ]
+        ],
     )
 
 
@@ -202,6 +207,9 @@ def _calibration(calibrated: bool) -> CalibrationConfig:
         world_points=[(0, 0), (10, 0), (10, 20), (0, 20)],
         validation_image_points=[(25, 75), (75, 25)],
         validation_world_points=[(2.5, 15), (7.5, 5)],
+        reference_width=100,
+        reference_height=100,
+        minimum_validation_coverage=0.2,
         fallback_to_normalized=False,
     )
 
@@ -213,6 +221,7 @@ def _run(
     motion: list[tuple[float, float]] | None = None,
     overtake: list[OvertakingStatus] | None = None,
     capture_only: bool = False,
+    motion_estimator=None,
 ):
     source = _Source(len(xs))
     lanes = _lanes()
@@ -262,9 +271,13 @@ def _run(
                 max_position_jump_meters=2.0,
             )
         ),
-        camera_motion_estimator=_Motion(motion),
+        camera_motion_estimator=motion_estimator or _Motion(motion),
         camera_pose_validator=CameraPoseValidator(
-            CameraPoseValidationConfig(minimum_samples=1, persistence_seconds=0.0)
+            CameraPoseValidationConfig(
+                minimum_samples=1,
+                persistence_seconds=0.0,
+                scale_persistence_seconds=0.0,
+            )
         ),
         physical_measurement_policy=PhysicalMeasurementPolicy(
             PhysicalMeasurementsConfig(), calibration
@@ -279,6 +292,9 @@ def _run(
         event_writer=writer,  # type: ignore[arg-type]
         annotator=_Annotator(),  # type: ignore[arg-type]
         debug_sink=None,
+        geometry_integrity_policy=GeometryIntegrityPolicy(
+            GeometryIntegrityConfig(), lanes
+        ),
     )
     summary = pipeline.run()
     return summary, writer, capturing

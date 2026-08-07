@@ -45,6 +45,8 @@ class PhysicalMeasurementPolicy:
             calibration.validation_mode == "INDEPENDENT_VALIDATION_POINTS"
             and calibration.validation_reprojection_error_pixels is not None
             and "VALIDATION_ERROR_HIGH" not in calibration.reason_codes
+            and "VALIDATION_WORLD_ERROR_HIGH" not in calibration.reason_codes
+            and "ROAD_REGION_POORLY_VALIDATED" not in calibration.reason_codes
         )
         permit_unverified = (
             self._calibration_config.allow_unverified_physical_measurements
@@ -62,6 +64,8 @@ class PhysicalMeasurementPolicy:
             )
         ):
             reasons.append("CALIBRATION_CONFIDENCE_LOW")
+        if "CALIBRATION_REFERENCE_SIZE_UNAVAILABLE" in calibration.reason_codes:
+            reasons.append("CALIBRATION_REFERENCE_SIZE_UNAVAILABLE")
         pose_status = camera_pose.status if camera_pose is not None else "unavailable"
         if pose_status == "moved" and self._config.disable_on_camera_pose_moved:
             reasons.append("CAMERA_POSE_UNSTABLE")

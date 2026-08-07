@@ -43,10 +43,18 @@ class LaneConfig(StrictModel):
 class LanesConfig(StrictModel):
     coordinate_space: Literal["normalized", "pixels"] = "normalized"
     assignment_anchor: Literal["bottom_center"] = "bottom_center"
+    reference_width: int | None = Field(default=None, gt=0)
+    reference_height: int | None = Field(default=None, gt=0)
+    reference_pose_id: str | None = None
+    scaling_mode: Literal["exact", "uniform"] = "uniform"
     lanes: list[LaneConfig] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_lanes(self) -> LanesConfig:
+        if (self.reference_width is None) != (self.reference_height is None):
+            raise ValueError(
+                "lane reference_width and reference_height must be set together"
+            )
         ids = [lane.id for lane in self.lanes]
         if len(ids) != len(set(ids)):
             raise ValueError("lane IDs must be unique")
@@ -107,9 +115,15 @@ class CalibrationConfig(StrictModel):
     world_points: list[tuple[float, float]] = Field(default_factory=list)
     validation_image_points: list[tuple[float, float]] = Field(default_factory=list)
     validation_world_points: list[tuple[float, float]] = Field(default_factory=list)
+    reference_width: int | None = Field(default=None, gt=0)
+    reference_height: int | None = Field(default=None, gt=0)
     fallback_to_normalized: bool = True
     maximum_reprojection_error_pixels: float = Field(default=5.0, gt=0)
     maximum_validation_reprojection_error_pixels: float = Field(default=5.0, gt=0)
+    maximum_validation_rmse_world_units: float = Field(default=1.0, gt=0)
+    maximum_validation_p95_world_units: float = Field(default=2.0, gt=0)
+    minimum_validation_coverage: float = Field(default=0.35, ge=0, le=1)
+    support_region_margin_pixels: float = Field(default=0.0, ge=0)
     maximum_condition_number: float = Field(default=1_000_000.0, gt=1)
     minimum_image_control_area_pixels2: float = Field(default=100.0, gt=0)
     minimum_world_control_area_units2: float = Field(default=0.5, gt=0)
@@ -127,6 +141,10 @@ class CalibrationConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_correspondences(self) -> CalibrationConfig:
+        if (self.reference_width is None) != (self.reference_height is None):
+            raise ValueError(
+                "calibration reference_width and reference_height must be set together"
+            )
         if self.mode == "normalized":
             return self
         if len(self.image_points) != len(self.world_points):
@@ -183,6 +201,12 @@ class CameraPoseValidationConfig(StrictModel):
     translation_invalid_px: float = Field(default=3.0, gt=0)
     rotation_warning_deg: float = Field(default=0.15, gt=0)
     rotation_invalid_deg: float = Field(default=0.35, gt=0)
+    scale_noise_floor_ratio: float = Field(default=0.0005, ge=0)
+    scale_warning_ratio: float = Field(default=0.003, gt=0)
+    scale_invalid_ratio: float = Field(default=0.01, gt=0)
+    scale_persistence_seconds: float = Field(default=0.5, ge=0)
+    projective_warning_score: float = Field(default=0.0025, gt=0)
+    projective_invalid_score: float = Field(default=0.0075, gt=0)
     persistence_seconds: float = Field(default=0.5, ge=0)
 
     @model_validator(mode="after")
@@ -191,6 +215,10 @@ class CameraPoseValidationConfig(StrictModel):
             raise ValueError("translation warning must be below invalid threshold")
         if self.rotation_warning_deg >= self.rotation_invalid_deg:
             raise ValueError("rotation warning must be below invalid threshold")
+        if self.scale_warning_ratio >= self.scale_invalid_ratio:
+            raise ValueError("scale warning must be below invalid threshold")
+        if self.projective_warning_score >= self.projective_invalid_score:
+            raise ValueError("projective warning must be below invalid threshold")
         return self
 
 
@@ -218,6 +246,35 @@ class CameraMotionConfig(StrictModel):
     excessive_translation_pixels: float = Field(default=8.0, gt=0)
     minimum_confidence: float = Field(default=0.35, ge=0, le=1)
     mask_vehicle_boxes: bool = True
+    reference_analysis_interval_frames: int = Field(default=15, ge=1)
+    projective_ransac_threshold_pixels: float = Field(default=3.0, gt=0)
+
+
+class GeometryIntegrityConfig(StrictModel):
+    """Fail-closed policy for every decision tied to configured road geometry."""
+
+    enabled: bool = True
+    require_verified_camera_pose: bool = True
+    external_fixed_camera_guarantee: bool = False
+    external_guarantee_id: str | None = None
+    minimum_pose_confidence: float = Field(default=0.35, ge=0, le=1)
+    allow_uniform_frame_scaling: bool = True
+
+    @model_validator(mode="after")
+    def validate_external_guarantee(self) -> GeometryIntegrityConfig:
+        if (
+            not self.require_verified_camera_pose
+            and not self.external_fixed_camera_guarantee
+        ):
+            raise ValueError(
+                "disabling runtime pose verification requires an explicit "
+                "external fixed-camera guarantee"
+            )
+        if self.external_fixed_camera_guarantee and not self.external_guarantee_id:
+            raise ValueError(
+                "external_fixed_camera_guarantee requires external_guarantee_id"
+            )
+        return self
 
 
 class CandidateLifecycleConfig(StrictModel):
@@ -338,6 +395,9 @@ class AppConfig(StrictModel):
     camera_motion: CameraMotionConfig = Field(default_factory=CameraMotionConfig)
     camera_pose_validation: CameraPoseValidationConfig = Field(
         default_factory=CameraPoseValidationConfig
+    )
+    geometry_integrity: GeometryIntegrityConfig = Field(
+        default_factory=GeometryIntegrityConfig
     )
     candidate_lifecycle: CandidateLifecycleConfig = Field(
         default_factory=CandidateLifecycleConfig

@@ -14,8 +14,12 @@ from app.models import (
     CandidateDecisionRecord,
     CandidateTransition,
     CongestionLevel,
+    FrameGeometry,
     GapEstimate,
+    GeometryIntegrityAssessment,
+    GeometryIntegrityStatus,
     GlobalTrafficContext,
+    LaneGeometryTrust,
     NeighborVehicles,
     OvertakeState,
     OvertakingAssessment,
@@ -143,6 +147,39 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
                 physical_measurements=PhysicalMeasurementPermission(
                     False, 0.0, "unavailable", ("CALIBRATION_NOT_CONFIGURED",)
                 ),
+                geometry_integrity=GeometryIntegrityAssessment(
+                    status=GeometryIntegrityStatus.TRUSTED,
+                    confidence=0.9,
+                    trust_source="external_deployment_guarantee",
+                    lane_assignment_allowed=True,
+                    normalized_relationships_allowed=True,
+                    world_relationships_allowed=False,
+                    physical_measurements_allowed=False,
+                    physical_speed_allowed=False,
+                    physical_gaps_allowed=False,
+                    right_lane_opportunity_allowed=True,
+                    overtaking_inference_allowed=True,
+                    candidate_generation_allowed=True,
+                    frame_geometry=FrameGeometry(
+                        width=32,
+                        height=24,
+                        aspect_ratio=32 / 24,
+                        reference_width=32,
+                        reference_height=24,
+                        reference_aspect_ratio=32 / 24,
+                        scale_x=1.0,
+                        scale_y=1.0,
+                        compatible=True,
+                        mapping_mode="exact",
+                        scaling_mode="uniform",
+                    ),
+                    lane_geometry=LaneGeometryTrust(
+                        status="trusted",
+                        confidence=0.9,
+                        reference_pose_id="fixture-pose",
+                        trust_source="external_deployment_guarantee",
+                    ),
+                ),
             )
         ],
     )
@@ -167,7 +204,7 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
     assert (event_directory / "representative.jpg").is_file()
     assert (event_directory / "event.mp4").is_file()
     assert metadata["event_type"] == "left_lane_review_candidate"
-    assert metadata["schema_version"] == "3.1"
+    assert metadata["schema_version"] == "3.2"
     assert metadata["review_status"] == "pending_human_review"
     assert metadata["candidate_lifecycle"]["state"] == "finalized"
     assert metadata["human_review_required"] is True
@@ -187,6 +224,8 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
     assert metadata["traffic_context"]["right_lane_front_gap_m"] is None
     assert metadata["traffic_context"]["right_lane_front_gap_normalized"] == 0.12
     assert metadata["physical_measurements"]["allowed"] is False
+    assert metadata["geometry_integrity"]["candidate_generation_allowed"] is True
+    assert metadata["geometry_integrity"]["lane_geometry"]["trusted"] is True
     assert metadata["world_position_m"] is None
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1
 

@@ -74,8 +74,14 @@ def main() -> int:
             cv2.LINE_AA,
         )
 
+    calibration_scale, calibration_frame_compatible = _calibration_frame_scale(
+        config.calibration.reference_width,
+        config.calibration.reference_height,
+        width,
+        height,
+    )
     for index, point in enumerate(config.calibration.image_points):
-        pixel = tuple(round(value) for value in point)
+        pixel = _scaled_pixel(point, calibration_scale)
         cv2.circle(preview, pixel, 6, (20, 80, 255), -1, cv2.LINE_AA)
         world = config.calibration.world_points[index]
         cv2.putText(
@@ -90,7 +96,7 @@ def main() -> int:
         )
 
     for index, point in enumerate(config.calibration.validation_image_points):
-        pixel = tuple(round(value) for value in point)
+        pixel = _scaled_pixel(point, calibration_scale)
         cv2.drawMarker(
             preview,
             pixel,
@@ -112,7 +118,22 @@ def main() -> int:
         )
 
     if isinstance(transformer, HomographyRoadTransformer):
-        _draw_world_grid(preview, transformer, config.calibration.world_points, cv2)
+        _draw_world_grid(
+            preview,
+            transformer,
+            config.calibration.world_points,
+            calibration_scale,
+            cv2,
+        )
+        support = np.asarray(
+            [
+                _scaled_pixel(tuple(point), calibration_scale)
+                for point in transformer.support_region_image_points
+            ],
+            dtype=np.int32,
+        )
+        if len(support) >= 3:
+            cv2.polylines(preview, [support], True, (0, 220, 255), 2, cv2.LINE_AA)
     status = transformer.calibration_quality
     permission = PhysicalMeasurementPolicy(
         config.physical_measurements, config.calibration
@@ -137,10 +158,17 @@ def main() -> int:
         if status.validation_reprojection_error_pixels is not None
         else "N/A"
     )
+    world_rmse = (
+        f"{status.validation_world_rmse:.3f}"
+        if status.validation_world_rmse is not None
+        else "N/A"
+    )
     label = (
         f"CALIBRATION {status.mode.upper()} matrix={status.matrix_valid} "
         f"validation={status.validation_mode} fit={fit}px validation_error={validation}px "
-        f"confidence={status.confidence:.2f} physical={'ON' if permission.allowed else 'OFF'}"
+        f"world_rmse={world_rmse}m coverage={status.validation_coverage or 0:.2f} "
+        f"frame={'OK' if calibration_frame_compatible else 'INVALID'} "
+        f"physical={'ON' if permission.allowed else 'OFF'}"
     )
     cv2.rectangle(preview, (0, 0), (min(width, 900), 34), (30, 30, 30), -1)
     cv2.putText(
@@ -162,12 +190,18 @@ def main() -> int:
     LOGGER.info(
         "Calibration diagnostics: matrix_valid=%s numerically_stable=%s "
         "validation_mode=%s fit_error_px=%s validation_error_px=%s "
+        "world_rmse=%s world_mae=%s world_max=%s world_p95=%s coverage=%s "
         "condition_metric=%s confidence=%.2f basis=%s reasons=%s",
         status.matrix_valid,
         status.numerically_stable,
         status.validation_mode,
         status.fit_reprojection_error_pixels,
         status.validation_reprojection_error_pixels,
+        status.validation_world_rmse,
+        status.validation_world_mae,
+        status.validation_world_max_error,
+        status.validation_world_p95_error,
+        status.validation_coverage,
         status.condition_metric,
         status.confidence,
         status.confidence_basis,
@@ -194,6 +228,7 @@ def _draw_world_grid(
     image: np.ndarray,
     transformer: HomographyRoadTransformer,
     world_points: list[tuple[float, float]],
+    scale: tuple[float, float],
     cv2: object,
 ) -> None:
     if not world_points:
@@ -201,9 +236,23 @@ def _draw_world_grid(
     xs = np.asarray([point[0] for point in world_points])
     ys = np.asarray([point[1] for point in world_points])
     for x in np.linspace(float(xs.min()), float(xs.max()), 7):
-        _world_line(image, transformer, (x, float(ys.min())), (x, float(ys.max())), cv2)
+        _world_line(
+            image,
+            transformer,
+            (x, float(ys.min())),
+            (x, float(ys.max())),
+            scale,
+            cv2,
+        )
     for y in np.linspace(float(ys.min()), float(ys.max()), 11):
-        _world_line(image, transformer, (float(xs.min()), y), (float(xs.max()), y), cv2)
+        _world_line(
+            image,
+            transformer,
+            (float(xs.min()), y),
+            (float(xs.max()), y),
+            scale,
+            cv2,
+        )
 
 
 def _world_line(
@@ -211,11 +260,31 @@ def _world_line(
     transformer: HomographyRoadTransformer,
     start: tuple[float, float],
     end: tuple[float, float],
+    scale: tuple[float, float],
     cv2: object,
 ) -> None:
-    first = tuple(round(value) for value in transformer.world_to_image(start))
-    second = tuple(round(value) for value in transformer.world_to_image(end))
+    first = _scaled_pixel(transformer.world_to_image(start), scale)
+    second = _scaled_pixel(transformer.world_to_image(end), scale)
     cv2.line(image, first, second, (255, 170, 40), 1, cv2.LINE_AA)
+
+
+def _calibration_frame_scale(
+    reference_width: int | None,
+    reference_height: int | None,
+    runtime_width: int,
+    runtime_height: int,
+) -> tuple[tuple[float, float], bool]:
+    if reference_width is None or reference_height is None:
+        return (1.0, 1.0), False
+    scale_x = runtime_width / reference_width
+    scale_y = runtime_height / reference_height
+    return (scale_x, scale_y), bool(abs(scale_x - scale_y) <= 1e-6)
+
+
+def _scaled_pixel(
+    point: tuple[float, float], scale: tuple[float, float]
+) -> tuple[int, int]:
+    return round(point[0] * scale[0]), round(point[1] * scale[1])
 
 
 if __name__ == "__main__":

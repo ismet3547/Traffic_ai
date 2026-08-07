@@ -32,6 +32,7 @@ from app.positioning import (
     build_road_coordinate_transformer,
 )
 from app.speed import RollingSpeedEstimator
+from tests.helpers import trusted_geometry
 
 
 def _calibration(*, validated: bool = False, **updates: object) -> CalibrationConfig:
@@ -39,12 +40,14 @@ def _calibration(*, validated: bool = False, **updates: object) -> CalibrationCo
         "mode": "homography",
         "image_points": [(0, 0), (100, 0), (100, 100), (0, 100)],
         "world_points": [(0, 0), (10, 0), (10, 20), (0, 20)],
+        "reference_width": 100,
+        "reference_height": 100,
         "fallback_to_normalized": False,
     }
     if validated:
         values.update(
-            validation_image_points=[(25, 75), (75, 25)],
-            validation_world_points=[(2.5, 15), (7.5, 5)],
+            validation_image_points=[(20, 20), (80, 20), (80, 80), (20, 80)],
+            validation_world_points=[(2, 4), (8, 4), (8, 16), (2, 16)],
         )
     values.update(updates)
     return CalibrationConfig(**values)
@@ -207,6 +210,7 @@ def test_gap_units_follow_explicit_coordinate_capability(
         positions,
         MotionHistoryStore(TrafficContextConfig()),
         physical_measurements=_permission(calibrated),
+        geometry_integrity=trusted_geometry(physical_allowed=calibrated),
     )
     context = RightLaneOpportunityTracker(RightLaneOpportunityConfig()).update(
         context, 0.0
@@ -233,6 +237,7 @@ def test_world_gap_is_not_exposed_when_central_permission_is_denied() -> None:
         positions,
         MotionHistoryStore(TrafficContextConfig()),
         physical_measurements=_permission(False),
+        geometry_integrity=trusted_geometry(),
     )
     context = RightLaneOpportunityTracker(RightLaneOpportunityConfig()).update(
         context, 0.0

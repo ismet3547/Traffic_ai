@@ -10,6 +10,7 @@ from app.models import (
     CameraMotionEstimate,
     CameraPoseStatus,
     CongestionLevel,
+    GeometryIntegrityAssessment,
     GlobalTrafficContext,
     LaneObservation,
     NeighborReference,
@@ -45,6 +46,7 @@ class TrafficContextAnalyzer:
         camera_pose: CameraPoseStatus | None = None,
         physical_measurements: PhysicalMeasurementPermission | None = None,
         speeds: dict[int, SpeedEstimate] | None = None,
+        geometry_integrity: GeometryIntegrityAssessment | None = None,
     ) -> TrafficFrameContext:
         lane_by_track = {
             observation.vehicle.track_id: observation.lane_id
@@ -64,11 +66,18 @@ class TrafficContextAnalyzer:
             camera_motion,
             camera_pose,
             physical_measurements,
+            geometry_integrity,
         )
         vehicles: dict[int, VehicleTrafficContext] = {}
         for track_id, position in positions.items():
             lane_id = lane_by_track.get(track_id)
-            adjacent_right = self._adjacent_right(lane_id)
+            relationships_allowed = (
+                geometry_integrity is not None
+                and geometry_integrity.normalized_relationships_allowed
+            )
+            adjacent_right = (
+                self._adjacent_right(lane_id) if relationships_allowed else None
+            )
             neighbors = self._neighbors(
                 track_id,
                 lane_id,
@@ -76,7 +85,7 @@ class TrafficContextAnalyzer:
                 lane_by_track,
                 positions,
                 allow_physical=(
-                    physical_measurements.allowed
+                    physical_measurements.allowed and relationships_allowed
                     if physical_measurements is not None
                     else False
                 ),
@@ -99,7 +108,9 @@ class TrafficContextAnalyzer:
                 else None
             )
             nearby_count = 0
-            for other_id, other_position in positions.items():
+            for other_id, other_position in (
+                positions.items() if relationships_allowed else ()
+            ):
                 if other_id == track_id or target_longitudinal is None:
                     continue
                 if use_physical:
@@ -138,6 +149,7 @@ class TrafficContextAnalyzer:
         camera_motion: CameraMotionEstimate | None,
         camera_pose: CameraPoseStatus | None,
         physical_measurements: PhysicalMeasurementPermission | None,
+        geometry_integrity: GeometryIntegrityAssessment | None,
     ) -> GlobalTrafficContext:
         total = sum(lane_counts.values())
         lane_count = max(1, len(self._lane_ids))
@@ -174,6 +186,11 @@ class TrafficContextAnalyzer:
             and physical_measurements.allowed
             else "normalized_image"
         )
+        if (
+            geometry_integrity is not None
+            and not geometry_integrity.normalized_relationships_allowed
+        ):
+            coordinate_system = "unavailable_geometry"
         return GlobalTrafficContext(
             congestion_level=level,
             traffic_density=density,
@@ -186,6 +203,7 @@ class TrafficContextAnalyzer:
             camera_motion=camera_motion,
             camera_pose=camera_pose,
             physical_measurements=physical_measurements,
+            geometry_integrity=geometry_integrity,
         )
 
     def _congestion_level(

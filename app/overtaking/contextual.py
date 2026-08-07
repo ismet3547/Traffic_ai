@@ -80,6 +80,22 @@ class ContextualOvertakingPolicy:
             return NoOvertakingPolicy().update(
                 timestamp_seconds, observations, transitions, context, history, speeds
             )
+        geometry = context.global_context.geometry_integrity
+        if geometry is None or not geometry.overtaking_inference_allowed:
+            self._attempts.clear()
+            return {
+                observation.vehicle.track_id: OvertakingAssessment(
+                    track_id=observation.vehicle.track_id,
+                    status=OvertakingStatus.INSUFFICIENT_EVIDENCE,
+                    state=OvertakeState.NONE,
+                    confidence=0.0,
+                    evidence=(
+                        "GEOMETRY_INTEGRITY_LOST",
+                        *(geometry.reason_codes if geometry is not None else ()),
+                    ),
+                )
+                for observation in observations
+            }
 
         lane_by_track = {
             observation.vehicle.track_id: observation.lane_id

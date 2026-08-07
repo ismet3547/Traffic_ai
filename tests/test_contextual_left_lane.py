@@ -4,7 +4,10 @@ from dataclasses import dataclass
 
 from app.config import (
     CongestionConfig,
+    GeometryIntegrityConfig,
     LaneChangeConfig,
+    LaneConfig,
+    LanesConfig,
     LeftLaneRuleConfig,
     OvertakingConfig,
     RightLaneOpportunityConfig,
@@ -12,11 +15,13 @@ from app.config import (
     TrafficContextConfig,
 )
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
+from app.geometry import GeometryIntegrityPolicy
 from app.models import (
     BoundingBox,
     LaneObservation,
     OvertakeState,
     OvertakingStatus,
+    PhysicalMeasurementPermission,
     TrackedVehicle,
 )
 from app.motion import LaneTransitionDetector, MotionHistoryStore
@@ -96,6 +101,29 @@ class _Harness:
                 self.opportunity_config,
             ),
         )
+        self.geometry = GeometryIntegrityPolicy(
+            GeometryIntegrityConfig(
+                external_fixed_camera_guarantee=True,
+                external_guarantee_id="synthetic-test-fixture",
+            ),
+            LanesConfig(
+                reference_width=100,
+                reference_height=100,
+                lanes=[
+                    LaneConfig(
+                        id="left",
+                        label="Left",
+                        leftmost=True,
+                        polygon=[(0, 0), (1, 0), (1, 1)],
+                    )
+                ],
+            ),
+        ).evaluate(
+            100,
+            100,
+            None,
+            PhysicalMeasurementPermission(False, 0.0, "unavailable"),
+        )
         self.frame_index = 0
         self.transitions = []
         self.last_lane_transitions = []
@@ -107,7 +135,11 @@ class _Harness:
         lane_frame = self.lane_changes.update(raw, timestamp)
         positions = self.positioning.estimate(lane_frame.observations, 100, 100)
         context = self.context_analyzer.analyze(
-            timestamp, lane_frame.observations, positions, self.history
+            timestamp,
+            lane_frame.observations,
+            positions,
+            self.history,
+            geometry_integrity=self.geometry,
         )
         context = self.opportunities.update(context, timestamp)
         self.history.update(

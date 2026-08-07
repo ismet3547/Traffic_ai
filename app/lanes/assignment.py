@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from app.config import LanesConfig
-from app.models import LaneObservation, TrackedVehicle
+from app.models import GeometryIntegrityAssessment, LaneObservation, TrackedVehicle
 
 Point = tuple[float, float]
 
@@ -22,7 +22,14 @@ class LaneAssigner:
         self, frame_width: int, frame_height: int
     ) -> dict[str, list[Point]]:
         if self._config.coordinate_space == "pixels":
-            return {lane.id: list(lane.polygon) for lane in self._config.lanes}
+            reference_width = self._config.reference_width or frame_width
+            reference_height = self._config.reference_height or frame_height
+            scale_x = frame_width / reference_width
+            scale_y = frame_height / reference_height
+            return {
+                lane.id: [(x * scale_x, y * scale_y) for x, y in lane.polygon]
+                for lane in self._config.lanes
+            }
         return {
             lane.id: [(x * frame_width, y * frame_height) for x, y in lane.polygon]
             for lane in self._config.lanes
@@ -33,7 +40,12 @@ class LaneAssigner:
         vehicles: Sequence[TrackedVehicle],
         frame_width: int,
         frame_height: int,
+        geometry_integrity: GeometryIntegrityAssessment | None = None,
     ) -> list[LaneObservation]:
+        if geometry_integrity is None or not geometry_integrity.lane_assignment_allowed:
+            return [
+                LaneObservation(vehicle=vehicle, lane_id=None) for vehicle in vehicles
+            ]
         polygons = self.polygons_for_frame(frame_width, frame_height)
         observations: list[LaneObservation] = []
         for vehicle in vehicles:

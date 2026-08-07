@@ -12,6 +12,7 @@ from app.config import AppConfig, load_config
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import UltralyticsDetector
 from app.events import EventArtifactWriter
+from app.geometry import GeometryIntegrityPolicy
 from app.lanes import LaneAssigner
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import ContextualOvertakingPolicy, NoOvertakingPolicy
@@ -94,6 +95,9 @@ def main() -> int:
         physical_measurement_policy = PhysicalMeasurementPolicy(
             config.physical_measurements, config.calibration
         )
+        geometry_integrity_policy = GeometryIntegrityPolicy(
+            config.geometry_integrity, config.lanes
+        )
         motion_history = MotionHistoryStore(config.traffic_context)
         traffic_context_analyzer = TrafficContextAnalyzer(
             config.lanes.lane_ids_left_to_right,
@@ -158,6 +162,7 @@ def main() -> int:
             event_writer=event_writer,
             annotator=annotator,
             debug_sink=debug_sink,
+            geometry_integrity_policy=geometry_integrity_policy,
         )
         summary = pipeline.run()
     except Exception:

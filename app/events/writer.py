@@ -20,8 +20,11 @@ from app.models import (
     CandidateLifecycleMetadata,
     CandidateTransition,
     EventMetadata,
+    FrameGeometryMetadata,
     GapEstimate,
     GapEstimateMetadata,
+    GeometryIntegrityMetadata,
+    LaneGeometryMetadata,
     OvertakingAssessmentMetadata,
     PhysicalMeasurementMetadata,
     SpeedEstimateMetadata,
@@ -178,6 +181,7 @@ class EventArtifactWriter:
             camera_motion=_camera_motion_metadata(transition),
             camera_pose=_camera_pose_metadata(transition),
             physical_measurements=_physical_measurement_metadata(transition),
+            geometry_integrity=_geometry_integrity_metadata(transition),
             speed_estimate=_speed_metadata(transition),
             image_position=(
                 transition.position.image_position if transition.position else None
@@ -192,6 +196,16 @@ class EventArtifactWriter:
                 transition.position.coordinate_mode
                 if transition.position
                 else "normalized_image"
+            ),
+            inside_calibrated_region=(
+                transition.position.inside_calibrated_region
+                if transition.position
+                else None
+            ),
+            calibrated_region_status=(
+                transition.position.calibrated_region_status
+                if transition.position
+                else "unavailable"
             ),
         )
         recording = _Recording(
@@ -339,6 +353,8 @@ def _refresh_metadata(metadata: EventMetadata, transition: CandidateTransition) 
         metadata.normalized_position = transition.position.normalized_position
         metadata.world_position_m = transition.position.world_position_m
         metadata.coordinate_mode = transition.position.coordinate_mode
+        metadata.inside_calibrated_region = transition.position.inside_calibrated_region
+        metadata.calibrated_region_status = transition.position.calibrated_region_status
     if transition.calibration_quality is not None:
         metadata.calibration = _calibration_metadata(transition)
     if transition.camera_motion is not None:
@@ -347,6 +363,8 @@ def _refresh_metadata(metadata: EventMetadata, transition: CandidateTransition) 
         metadata.camera_pose = _camera_pose_metadata(transition)
     if transition.physical_measurements is not None:
         metadata.physical_measurements = _physical_measurement_metadata(transition)
+    if transition.geometry_integrity is not None:
+        metadata.geometry_integrity = _geometry_integrity_metadata(transition)
     if transition.speed_estimate is not None:
         metadata.speed_estimate = _speed_metadata(transition)
 
@@ -417,6 +435,17 @@ def _calibration_metadata(
         confidence_basis=status.confidence_basis,
         reason_codes=list(status.reason_codes),
         world_units=status.world_units,
+        validation_world_rmse=status.validation_world_rmse,
+        validation_world_mae=status.validation_world_mae,
+        validation_world_max_error=status.validation_world_max_error,
+        validation_world_p95_error=status.validation_world_p95_error,
+        validation_coverage=status.validation_coverage,
+        support_region_defined=status.support_region_defined,
+        validity_region_status=(
+            transition.position.calibrated_region_status
+            if transition.position is not None
+            else "unavailable"
+        ),
     )
 
 
@@ -435,6 +464,18 @@ def _camera_motion_metadata(
         level=motion.level,
         method=motion.method,
         stabilization_applied=motion.stabilization_applied,
+        scale_ratio=motion.scale_ratio,
+        scale_delta=motion.scale_delta,
+        scale_confidence=motion.scale_confidence,
+        projective_drift_score=(
+            motion.projective.drift_score if motion.projective else None
+        ),
+        projective_reprojection_error_pixels=(
+            motion.projective.reprojection_error_pixels if motion.projective else None
+        ),
+        projective_inlier_ratio=(
+            motion.projective.inlier_ratio if motion.projective else None
+        ),
     )
 
 
@@ -452,6 +493,70 @@ def _camera_pose_metadata(
         sample_count=pose.sample_count,
         stabilization_applied=pose.stabilization_applied,
         reason_codes=list(pose.reason_codes),
+        cumulative_scale_ratio=pose.cumulative_scale_ratio,
+        projective_drift_score=pose.projective_drift_score,
+        verification_mode=(
+            "runtime_background_diagnostic"
+            if transition.geometry_integrity is not None
+            and transition.geometry_integrity.trust_source == "measured_camera_pose"
+            else transition.geometry_integrity.trust_source
+            if transition.geometry_integrity is not None
+            else "unavailable"
+        ),
+        trust_source=(
+            transition.geometry_integrity.trust_source
+            if transition.geometry_integrity is not None
+            else "unavailable"
+        ),
+        cumulative_translation_px=pose.translation_px,
+        cumulative_rotation_deg=pose.rotation_deg,
+    )
+
+
+def _geometry_integrity_metadata(
+    transition: CandidateTransition,
+) -> GeometryIntegrityMetadata | None:
+    geometry = transition.geometry_integrity
+    if geometry is None:
+        return None
+    frame = geometry.frame_geometry
+    lane = geometry.lane_geometry
+    return GeometryIntegrityMetadata(
+        status=geometry.status.value,
+        confidence=geometry.confidence,
+        trust_source=geometry.trust_source,
+        lane_assignment_allowed=geometry.lane_assignment_allowed,
+        normalized_relationships_allowed=geometry.normalized_relationships_allowed,
+        world_relationships_allowed=geometry.world_relationships_allowed,
+        physical_measurements_allowed=geometry.physical_measurements_allowed,
+        physical_speed_allowed=geometry.physical_speed_allowed,
+        physical_gaps_allowed=geometry.physical_gaps_allowed,
+        right_lane_opportunity_allowed=geometry.right_lane_opportunity_allowed,
+        overtaking_inference_allowed=geometry.overtaking_inference_allowed,
+        candidate_generation_allowed=geometry.candidate_generation_allowed,
+        reason_codes=list(geometry.reason_codes),
+        frame_geometry=FrameGeometryMetadata(
+            width=frame.width,
+            height=frame.height,
+            aspect_ratio=frame.aspect_ratio,
+            reference_width=frame.reference_width,
+            reference_height=frame.reference_height,
+            reference_aspect_ratio=frame.reference_aspect_ratio,
+            scale_x=frame.scale_x,
+            scale_y=frame.scale_y,
+            compatible=frame.compatible,
+            mapping_mode=frame.mapping_mode,
+            scaling_mode=frame.scaling_mode,
+            reason_codes=list(frame.reason_codes),
+        ),
+        lane_geometry=LaneGeometryMetadata(
+            status=lane.status,
+            trusted=lane.trusted,
+            confidence=lane.confidence,
+            reference_pose_id=lane.reference_pose_id,
+            trust_source=lane.trust_source,
+            reason_codes=list(lane.reason_codes),
+        ),
     )
 
 

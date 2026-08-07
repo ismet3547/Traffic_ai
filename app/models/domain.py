@@ -101,6 +101,7 @@ class SuppressionReason(str, Enum):
     LOW_POSITION_CONFIDENCE = "LOW_POSITION_CONFIDENCE"
     UNSTABLE_TRACK = "UNSTABLE_TRACK"
     CAMERA_MOTION_HIGH = "CAMERA_MOTION_HIGH"
+    GEOMETRY_INTEGRITY_LOST = "GEOMETRY_INTEGRITY_LOST"
 
 
 class CandidateLifecycleState(str, Enum):
@@ -118,6 +119,74 @@ class EvidenceQuality(str, Enum):
     MEDIUM = "medium"
     LOW = "low"
     UNAVAILABLE = "unavailable"
+
+
+class GeometryIntegrityStatus(str, Enum):
+    TRUSTED = "trusted"
+    DEGRADED = "degraded"
+    UNVERIFIED = "unverified"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True, slots=True)
+class FrameGeometry:
+    width: int
+    height: int
+    aspect_ratio: float
+    reference_width: int | None
+    reference_height: int | None
+    reference_aspect_ratio: float | None
+    scale_x: float | None
+    scale_y: float | None
+    compatible: bool
+    mapping_mode: str
+    scaling_mode: str
+    reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LaneGeometryTrust:
+    status: str
+    confidence: float
+    reference_pose_id: str | None
+    trust_source: str
+    reason_codes: tuple[str, ...] = ()
+
+    @property
+    def trusted(self) -> bool:
+        return self.status == GeometryIntegrityStatus.TRUSTED.value
+
+
+@dataclass(frozen=True, slots=True)
+class GeometryIntegrityAssessment:
+    status: GeometryIntegrityStatus
+    confidence: float
+    trust_source: str
+    lane_assignment_allowed: bool
+    normalized_relationships_allowed: bool
+    world_relationships_allowed: bool
+    physical_measurements_allowed: bool
+    physical_speed_allowed: bool
+    physical_gaps_allowed: bool
+    right_lane_opportunity_allowed: bool
+    overtaking_inference_allowed: bool
+    candidate_generation_allowed: bool
+    frame_geometry: FrameGeometry
+    lane_geometry: LaneGeometryTrust
+    reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectivePoseEstimate:
+    valid: bool
+    drift_score: float | None
+    reprojection_error_pixels: float | None
+    inlier_ratio: float
+    confidence: float
+    reference_frame_index: int | None = None
+    sample_frame_index: int | None = None
+    method: str = "unavailable"
+    reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +210,8 @@ class RoadPosition:
     world_position_confidence: float = 0.0
     physical_measurement_status: str = "unavailable"
     physical_measurement_reason_codes: tuple[str, ...] = ()
+    inside_calibrated_region: bool | None = None
+    calibrated_region_status: str = "unavailable"
 
     @property
     def coordinate_mode(self) -> str:
@@ -160,6 +231,12 @@ class CalibrationQuality:
     confidence_basis: str
     reason_codes: tuple[str, ...] = ()
     world_units: str | None = None
+    validation_world_rmse: float | None = None
+    validation_world_mae: float | None = None
+    validation_world_max_error: float | None = None
+    validation_world_p95_error: float | None = None
+    validation_coverage: float | None = None
+    support_region_defined: bool = False
 
     @property
     def valid(self) -> bool:
@@ -192,6 +269,10 @@ class CameraMotionEstimate:
     level: str = "unknown"
     method: str = "none"
     stabilization_applied: bool = False
+    scale_ratio: float | None = None
+    scale_delta: float | None = None
+    scale_confidence: float = 0.0
+    projective: ProjectivePoseEstimate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +284,8 @@ class CameraPoseStatus:
     sample_count: int
     stabilization_applied: bool = False
     reason_codes: tuple[str, ...] = ()
+    cumulative_scale_ratio: float | None = None
+    projective_drift_score: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +360,7 @@ class GlobalTrafficContext:
     camera_motion: CameraMotionEstimate | None = None
     camera_pose: CameraPoseStatus | None = None
     physical_measurements: PhysicalMeasurementPermission | None = None
+    geometry_integrity: GeometryIntegrityAssessment | None = None
 
     @property
     def calibration_status(self) -> CalibrationQuality | None:
@@ -348,6 +432,8 @@ class VehicleRuleStatus:
     right_lane_gap: GapEstimate | None = None
     physical_measurement_status: str = "unavailable"
     physical_measurement_reason_codes: tuple[str, ...] = ()
+    geometry_integrity_status: str = GeometryIntegrityStatus.UNVERIFIED.value
+    geometry_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +483,7 @@ class CandidateTransition:
     camera_motion: CameraMotionEstimate | None = None
     camera_pose: CameraPoseStatus | None = None
     physical_measurements: PhysicalMeasurementPermission | None = None
+    geometry_integrity: GeometryIntegrityAssessment | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +559,13 @@ class CalibrationQualityMetadata(BaseModel):
     confidence_basis: str
     reason_codes: list[str] = Field(default_factory=list)
     world_units: str | None = None
+    validation_world_rmse: float | None = Field(default=None, ge=0)
+    validation_world_mae: float | None = Field(default=None, ge=0)
+    validation_world_max_error: float | None = Field(default=None, ge=0)
+    validation_world_p95_error: float | None = Field(default=None, ge=0)
+    validation_coverage: float | None = Field(default=None, ge=0, le=1)
+    support_region_defined: bool = False
+    validity_region_status: str = "unavailable"
 
 
 class CameraMotionMetadata(BaseModel):
@@ -485,6 +579,12 @@ class CameraMotionMetadata(BaseModel):
     level: str
     method: str
     stabilization_applied: bool = False
+    scale_ratio: float | None = Field(default=None, gt=0)
+    scale_delta: float | None = None
+    scale_confidence: float = Field(default=0, ge=0, le=1)
+    projective_drift_score: float | None = Field(default=None, ge=0)
+    projective_reprojection_error_pixels: float | None = Field(default=None, ge=0)
+    projective_inlier_ratio: float | None = Field(default=None, ge=0, le=1)
 
 
 class CameraPoseMetadata(BaseModel):
@@ -497,6 +597,60 @@ class CameraPoseMetadata(BaseModel):
     sample_count: int = Field(ge=0)
     stabilization_applied: bool = False
     reason_codes: list[str] = Field(default_factory=list)
+    cumulative_scale_ratio: float | None = Field(default=None, ge=0)
+    projective_drift_score: float | None = Field(default=None, ge=0)
+    verification_mode: str = "unavailable"
+    trust_source: str = "unavailable"
+    cumulative_translation_px: float | None = Field(default=None, ge=0)
+    cumulative_rotation_deg: float | None = None
+
+
+class FrameGeometryMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    aspect_ratio: float = Field(gt=0)
+    reference_width: int | None = Field(default=None, gt=0)
+    reference_height: int | None = Field(default=None, gt=0)
+    reference_aspect_ratio: float | None = Field(default=None, gt=0)
+    scale_x: float | None = Field(default=None, gt=0)
+    scale_y: float | None = Field(default=None, gt=0)
+    compatible: bool
+    mapping_mode: str
+    scaling_mode: str
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class LaneGeometryMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    trusted: bool
+    confidence: float = Field(ge=0, le=1)
+    reference_pose_id: str | None = None
+    trust_source: str
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class GeometryIntegrityMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    confidence: float = Field(ge=0, le=1)
+    trust_source: str
+    lane_assignment_allowed: bool
+    normalized_relationships_allowed: bool
+    world_relationships_allowed: bool
+    physical_measurements_allowed: bool
+    physical_speed_allowed: bool
+    physical_gaps_allowed: bool
+    right_lane_opportunity_allowed: bool
+    overtaking_inference_allowed: bool
+    candidate_generation_allowed: bool
+    reason_codes: list[str] = Field(default_factory=list)
+    frame_geometry: FrameGeometryMetadata
+    lane_geometry: LaneGeometryMetadata
 
 
 class PhysicalMeasurementMetadata(BaseModel):
@@ -559,7 +713,7 @@ class EventMetadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "3.1"
+    schema_version: str = "3.2"
     event_id: str
     event_type: Literal["left_lane_review_candidate"] = "left_lane_review_candidate"
     review_status: Literal[
@@ -593,8 +747,11 @@ class EventMetadata(BaseModel):
     camera_motion: CameraMotionMetadata | None = None
     camera_pose: CameraPoseMetadata | None = None
     physical_measurements: PhysicalMeasurementMetadata | None = None
+    geometry_integrity: GeometryIntegrityMetadata | None = None
     speed_estimate: SpeedEstimateMetadata | None = None
     image_position: tuple[float, float] | None = None
     normalized_position: tuple[float, float] | None = None
     world_position_m: tuple[float, float] | None = None
     coordinate_mode: str = "normalized_image"
+    inside_calibrated_region: bool | None = None
+    calibrated_region_status: str = "unavailable"

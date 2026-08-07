@@ -20,6 +20,9 @@ def test_default_config_loads() -> None:
     assert config.candidate_lifecycle.finalize_after_seconds is None
     assert config.candidate_lifecycle.evidence_settle_seconds == 2.0
     assert config.physical_measurements.require_independent_validation
+    assert config.geometry_integrity.require_verified_camera_pose
+    assert not config.geometry_integrity.external_fixed_camera_guarantee
+    assert config.lanes.reference_width is None
 
 
 def test_calibrated_example_config_loads() -> None:
@@ -29,6 +32,14 @@ def test_calibrated_example_config_loads() -> None:
     assert config.calibration.mode == "homography"
     assert len(config.calibration.image_points) == 4
     assert config.calibration.world_units == "meters"
+
+
+def test_demo_fixed_camera_config_names_external_guarantee() -> None:
+    path = Path(__file__).resolve().parents[1] / "configs" / "demo_fixed_camera.yaml"
+    config = load_config(path)
+    assert config.geometry_integrity.external_fixed_camera_guarantee
+    assert config.geometry_integrity.external_guarantee_id
+    assert config.lanes.reference_pose_id
 
 
 def test_rule_lane_must_be_marked_leftmost() -> None:

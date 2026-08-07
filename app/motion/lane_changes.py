@@ -35,7 +35,17 @@ class LaneTransitionDetector:
         self,
         observations: list[LaneObservation],
         timestamp_seconds: float,
+        geometry_allowed: bool = True,
     ) -> LaneChangeFrame:
+        if not geometry_allowed:
+            self._states.clear()
+            return LaneChangeFrame(
+                observations=[
+                    LaneObservation(vehicle=item.vehicle, lane_id=None)
+                    for item in observations
+                ],
+                transitions=[],
+            )
         stabilized: list[LaneObservation] = []
         transitions: list[LaneTransition] = []
         seen_ids: set[int] = set()

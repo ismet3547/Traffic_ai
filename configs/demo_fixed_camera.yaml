@@ -1,0 +1,32 @@
+# DEMO ONLY. Verify the camera mount and replace all lane coordinates before use.
+# This file demonstrates the explicit escape hatch for externally guaranteed,
+# immobile fixed cameras when no visual pose estimator is enabled.
+video:
+  input_path: input/highway.mp4
+
+lanes:
+  coordinate_space: normalized
+  assignment_anchor: bottom_center
+  reference_width: 1280
+  reference_height: 720
+  reference_pose_id: demo_tripod_pose
+  scaling_mode: uniform
+  lanes:
+    - id: left
+      label: Left lane
+      leftmost: true
+      polygon: [[0.06, 1.0], [0.39, 1.0], [0.49, 0.43], [0.43, 0.43]]
+    - id: center
+      label: Center lane
+      polygon: [[0.39, 1.0], [0.69, 1.0], [0.55, 0.43], [0.49, 0.43]]
+    - id: right
+      label: Right lane
+      polygon: [[0.69, 1.0], [0.98, 1.0], [0.61, 0.43], [0.55, 0.43]]
+
+geometry_integrity:
+  enabled: true
+  require_verified_camera_pose: true
+  external_fixed_camera_guarantee: true
+  external_guarantee_id: demo_operator_verified_tripod
+  minimum_pose_confidence: 0.35
+  allow_uniform_frame_scaling: true

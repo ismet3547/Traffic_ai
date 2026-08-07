@@ -19,6 +19,12 @@ tracker:
 lanes:
   coordinate_space: normalized
   assignment_anchor: bottom_center
+  # Set these to the dimensions used when lane polygons were authored.
+  # Null is fail-closed: polygons render for setup but cannot drive decisions.
+  reference_width: null
+  reference_height: null
+  reference_pose_id: null
+  scaling_mode: uniform
   # Lane list order is left-to-right in the observed direction of travel.
   # Example polygons only. Calibrate these to the actual camera view.
   # Points are [x / frame_width, y / frame_height].
@@ -61,9 +67,15 @@ calibration:
   world_points: []
   validation_image_points: []
   validation_world_points: []
+  reference_width: null
+  reference_height: null
   fallback_to_normalized: true
   maximum_reprojection_error_pixels: 5.0
   maximum_validation_reprojection_error_pixels: 5.0
+  maximum_validation_rmse_world_units: 1.0
+  maximum_validation_p95_world_units: 2.0
+  minimum_validation_coverage: 0.35
+  support_region_margin_pixels: 0.0
   maximum_condition_number: 1000000.0
   minimum_image_control_area_pixels2: 100.0
   minimum_world_control_area_units2: 0.5
@@ -92,8 +104,9 @@ speed_estimation:
   max_position_jump_meters: 20.0
   tracker_gap_grace_seconds: 0.5
 
-# "none" is the production-safe fixed-camera default. feature_based is an
-# experimental diagnostic and does not stabilize or warp frames.
+# "none" means pose is not verified, so geometry judgments/candidates are off
+# unless the explicit external deployment guarantee is configured.
+# feature_based is experimental and does not stabilize or warp frames.
 camera_motion:
   mode: none
   maximum_features: 250
@@ -101,6 +114,8 @@ camera_motion:
   excessive_translation_pixels: 8.0
   minimum_confidence: 0.35
   mask_vehicle_boxes: true
+  reference_analysis_interval_frames: 15
+  projective_ransac_threshold_pixels: 3.0
 
 camera_pose_validation:
   enabled: true
@@ -111,7 +126,23 @@ camera_pose_validation:
   translation_invalid_px: 3.0
   rotation_warning_deg: 0.15
   rotation_invalid_deg: 0.35
+  scale_noise_floor_ratio: 0.0005
+  scale_warning_ratio: 0.003
+  scale_invalid_ratio: 0.01
+  scale_persistence_seconds: 0.5
+  projective_warning_score: 0.0025
+  projective_invalid_score: 0.0075
   persistence_seconds: 0.5
+
+# All road-geometry judgments fail closed unless the camera pose is measured
+# stable or an operator explicitly supplies a named fixed-camera guarantee.
+geometry_integrity:
+  enabled: true
+  require_verified_camera_pose: true
+  external_fixed_camera_guarantee: false
+  external_guarantee_id: null
+  minimum_pose_confidence: 0.35
+  allow_uniform_frame_scaling: true
 
 candidate_lifecycle:
   invalidation_grace_seconds: 2.0

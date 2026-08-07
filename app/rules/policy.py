@@ -47,6 +47,13 @@ class ContextualLeftLaneDecisionPolicy:
         overtaking: OvertakingAssessment | None,
         speed: SpeedEstimate | None = None,
     ) -> CandidateDecision:
+        geometry = traffic.geometry_integrity if traffic is not None else None
+        if geometry is None or not geometry.candidate_generation_allowed:
+            return _suppressed(
+                BehaviorClassification.INSUFFICIENT_EVIDENCE,
+                SuppressionReason.GEOMETRY_INTEGRITY_LOST,
+                geometry.confidence if geometry is not None else 0.0,
+            )
         calibration = traffic.calibration_quality if traffic is not None else None
         permission = traffic.physical_measurements if traffic is not None else None
         if (

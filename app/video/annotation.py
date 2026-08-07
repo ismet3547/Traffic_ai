@@ -69,6 +69,7 @@ class DebugAnnotator:
             motion = traffic.camera_motion
             pose = traffic.camera_pose
             permission = traffic.physical_measurements
+            geometry = traffic.geometry_integrity
             calibration_label = (
                 f"{calibration.mode.upper()}/{_quality(calibration.confidence)}"
                 if calibration is not None
@@ -84,9 +85,20 @@ class DebugAnnotator:
                 f"DENSITY: {traffic.traffic_density:.2f}  "
                 f"CALIBRATION: {calibration_label}  CAMERA MOTION: {motion_label}  "
                 f"POSE: {pose.status.upper() if pose else 'UNKNOWN'}  "
+                f"GEOMETRY: {geometry.status.value.upper() if geometry else 'UNKNOWN'}  "
+                f"CANDIDATES: "
+                f"{'ON' if geometry and geometry.candidate_generation_allowed else 'OFF'}  "
                 f"PHYSICAL: {'ON' if permission and permission.allowed else 'OFF'}"
             )
             self._label(output, traffic_label, (10, 24), (55, 55, 55))
+            if geometry is not None and not geometry.candidate_generation_allowed:
+                reason = _geometry_overlay_reason(geometry.reason_codes)
+                self._label(
+                    output,
+                    f"GEOMETRY JUDGMENTS DISABLED: {reason}",
+                    (10, 46),
+                    (20, 20, 180),
+                )
 
         observation_by_track = {
             observation.vehicle.track_id: observation for observation in observations
@@ -213,3 +225,16 @@ def _gap_label(gap: GapEstimate | None) -> str:
         return "CLEAR/UNKNOWN"
     suffix = "m" if gap.unit == "meters" else " norm"
     return f"{gap.value:.2f}{suffix}"
+
+
+def _geometry_overlay_reason(reason_codes: tuple[str, ...]) -> str:
+    for code in (
+        "CAMERA_SCALE_CHANGED",
+        "PROJECTIVE_DRIFT_DETECTED",
+        "FRAME_ASPECT_RATIO_MISMATCH",
+        "CAMERA_POSE_UNAVAILABLE",
+        "CAMERA_POSE_MOVED",
+    ):
+        if code in reason_codes:
+            return code
+    return reason_codes[0] if reason_codes else "UNVERIFIED"

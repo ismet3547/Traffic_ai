@@ -6,6 +6,11 @@ video:
 lanes:
   coordinate_space: normalized
   assignment_anchor: bottom_center
+  # PLACEHOLDER reference dimensions for this placeholder geometry.
+  reference_width: 1280
+  reference_height: 720
+  reference_pose_id: placeholder_tripod_pose
+  scaling_mode: uniform
   lanes:
     - id: left
       label: Left lane
@@ -33,9 +38,15 @@ calibration:
   # fitted matrix; these empty lists intentionally keep this example unverified.
   validation_image_points: []
   validation_world_points: []
+  reference_width: 1280
+  reference_height: 720
   fallback_to_normalized: false
   maximum_reprojection_error_pixels: 5.0
   maximum_validation_reprojection_error_pixels: 5.0
+  maximum_validation_rmse_world_units: 1.0
+  maximum_validation_p95_world_units: 2.0
+  minimum_validation_coverage: 0.35
+  support_region_margin_pixels: 0.0
   allow_unverified_physical_measurements: false
   suppress_candidates_when_unreliable: true
   camera_pose_mode: static
@@ -52,6 +63,14 @@ physical_measurements:
 # Diagnostic only. This estimates apparent motion but does not stabilize frames.
 camera_motion:
   mode: feature_based
+
+geometry_integrity:
+  enabled: true
+  require_verified_camera_pose: true
+  external_fixed_camera_guarantee: false
+  external_guarantee_id: null
+  minimum_pose_confidence: 0.35
+  allow_uniform_frame_scaling: true
 
 camera_pose_validation:
   enabled: true

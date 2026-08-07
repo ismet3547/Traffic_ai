@@ -74,8 +74,25 @@ class HomographyRoadTransformer:
         ):
             raise CalibrationError("PROJECTED_COORDINATES_OUT_OF_RANGE")
 
+        self._support_region = _convex_hull(
+            np.vstack(
+                (
+                    image_points,
+                    np.asarray(calibration.validation_image_points, dtype=np.float64),
+                )
+            )
+            if calibration.validation_image_points
+            else image_points
+        )
         validation_error: float | None = None
+        world_rmse: float | None = None
+        world_mae: float | None = None
+        world_max: float | None = None
+        world_p95: float | None = None
+        validation_coverage: float | None = None
         reasons: list[str] = []
+        if calibration.reference_width is None or calibration.reference_height is None:
+            reasons.append("CALIBRATION_REFERENCE_SIZE_UNAVAILABLE")
         if calibration.validation_image_points:
             validation_mode = "INDEPENDENT_VALIDATION_POINTS"
             validation_image = np.asarray(
@@ -87,26 +104,66 @@ class HomographyRoadTransformer:
             validation_error = _pixel_reprojection_error(
                 validation_image, validation_world, self._inverse_matrix
             )
-            confidence_basis = "independent_validation_reprojection_error"
+            world_errors = np.linalg.norm(
+                _perspective_transform(validation_image, self._matrix)
+                - validation_world,
+                axis=1,
+            )
+            world_rmse = float(np.sqrt(np.mean(world_errors**2)))
+            world_mae = float(np.mean(world_errors))
+            world_max = float(np.max(world_errors))
+            world_p95 = float(np.percentile(world_errors, 95))
+            validation_coverage = _validation_coverage(image_points, validation_image)
+            confidence_basis = "independent_world_and_pixel_validation"
             if (
                 not math.isfinite(validation_error)
                 or validation_error
                 > calibration.maximum_validation_reprojection_error_pixels
             ):
                 reasons.append("VALIDATION_ERROR_HIGH")
-                confidence = 0.0
-            else:
-                error_score = max(
-                    0.0,
-                    1.0
-                    - validation_error
-                    / calibration.maximum_validation_reprojection_error_pixels,
+            if (
+                world_rmse > calibration.maximum_validation_rmse_world_units
+                or world_p95 > calibration.maximum_validation_p95_world_units
+            ):
+                reasons.append("VALIDATION_WORLD_ERROR_HIGH")
+            if validation_coverage < calibration.minimum_validation_coverage:
+                reasons.append("VALIDATION_POINTS_CLUSTERED")
+                reasons.append("ROAD_REGION_POORLY_VALIDATED")
+            pixel_score = max(
+                0.0,
+                1.0
+                - validation_error
+                / calibration.maximum_validation_reprojection_error_pixels,
+            )
+            world_score = max(
+                0.0,
+                1.0 - world_rmse / calibration.maximum_validation_rmse_world_units,
+            )
+            condition_score = max(
+                0.5,
+                1.0 - self._condition_metric / calibration.maximum_condition_number,
+            )
+            confidence = min(
+                0.95,
+                0.95
+                * pixel_score
+                * world_score
+                * condition_score
+                * min(
+                    1.0,
+                    validation_coverage
+                    / max(0.01, calibration.minimum_validation_coverage),
+                ),
+            )
+            if any(
+                reason in reasons
+                for reason in (
+                    "VALIDATION_ERROR_HIGH",
+                    "VALIDATION_WORLD_ERROR_HIGH",
+                    "ROAD_REGION_POORLY_VALIDATED",
                 )
-                condition_score = max(
-                    0.5,
-                    1.0 - self._condition_metric / calibration.maximum_condition_number,
-                )
-                confidence = min(0.95, 0.95 * error_score * condition_score)
+            ):
+                confidence = min(confidence, 0.20)
         else:
             validation_mode = "FIT_POINTS_ONLY"
             validation_error = None
@@ -116,6 +173,8 @@ class HomographyRoadTransformer:
 
         if fit_error > calibration.maximum_reprojection_error_pixels:
             reasons.append("FIT_REPROJECTION_ERROR_HIGH")
+            confidence = min(confidence, 0.20)
+        if "CALIBRATION_REFERENCE_SIZE_UNAVAILABLE" in reasons:
             confidence = min(confidence, 0.20)
         self._calibration_quality = CalibrationQuality(
             mode="homography",
@@ -129,6 +188,12 @@ class HomographyRoadTransformer:
             confidence_basis=confidence_basis,
             reason_codes=tuple(reasons),
             world_units=calibration.world_units,
+            validation_world_rmse=world_rmse,
+            validation_world_mae=world_mae,
+            validation_world_max_error=world_max,
+            validation_world_p95_error=world_p95,
+            validation_coverage=validation_coverage,
+            support_region_defined=len(self._support_region) >= 3,
         )
 
     @property
@@ -145,6 +210,10 @@ class HomographyRoadTransformer:
     def matrix(self) -> np.ndarray:
         return self._matrix.copy()
 
+    @property
+    def support_region_image_points(self) -> np.ndarray:
+        return self._support_region.copy()
+
     def image_to_world(self, point: tuple[float, float]) -> tuple[float, float]:
         mapped = _perspective_transform(
             np.asarray([point], dtype=np.float64), self._matrix
@@ -158,6 +227,20 @@ class HomographyRoadTransformer:
             np.asarray([point], dtype=np.float64), self._inverse_matrix
         )[0]
         return float(mapped[0]), float(mapped[1])
+
+    def is_inside_support_region(self, point: tuple[float, float]) -> bool:
+        """Return whether a reference-image point is within measured coverage."""
+
+        if len(self._support_region) < 3:
+            return False
+        try:
+            import cv2
+        except ImportError:  # pragma: no cover
+            return False
+        distance = cv2.pointPolygonTest(
+            self._support_region.astype(np.float32), point, True
+        )
+        return bool(distance >= -self._config.support_region_margin_pixels)
 
     def estimate(
         self,
@@ -185,9 +268,17 @@ class HomographyRoadTransformer:
                 if self._road_position.travel_direction == "toward_bottom"
                 else 1.0 - normalized_y
             )
-            if permission.allowed:
+            calibration_xy, frame_compatible = self._to_reference_point(
+                image_xy, frame_width, frame_height
+            )
+            inside_region = bool(
+                frame_compatible
+                and calibration_xy is not None
+                and self.is_inside_support_region(calibration_xy)
+            )
+            if permission.allowed and frame_compatible and inside_region:
                 try:
-                    projected_world = self.image_to_world(image_xy)
+                    projected_world = self.image_to_world(calibration_xy)
                 except CalibrationError:
                     projected_world = None
                 if projected_world is not None:
@@ -211,6 +302,18 @@ class HomographyRoadTransformer:
                     world_position_m = None
                     position_status = "unavailable"
                     position_reasons = ("COORDINATE_TRANSFORM_INVALID",)
+            elif permission.allowed and not frame_compatible:
+                lateral, longitudinal = normalized_x, normalized_longitudinal
+                coordinate_system = "normalized_image"
+                world_position_m = None
+                position_status = "unavailable"
+                position_reasons = ("CALIBRATION_FRAME_GEOMETRY_INCOMPATIBLE",)
+            elif permission.allowed and not inside_region:
+                lateral, longitudinal = normalized_x, normalized_longitudinal
+                coordinate_system = "normalized_image"
+                world_position_m = None
+                position_status = "unavailable"
+                position_reasons = ("OUTSIDE_CALIBRATION_REGION",)
             else:
                 lateral, longitudinal = normalized_x, normalized_longitudinal
                 coordinate_system = "normalized_image"
@@ -232,8 +335,28 @@ class HomographyRoadTransformer:
                 ),
                 physical_measurement_status=position_status,
                 physical_measurement_reason_codes=position_reasons,
+                inside_calibrated_region=inside_region,
+                calibrated_region_status=(
+                    "inside" if inside_region else "outside_or_unavailable"
+                ),
             )
         return positions
+
+    def _to_reference_point(
+        self,
+        point: tuple[float, float],
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[tuple[float, float] | None, bool]:
+        reference_width = self._config.reference_width
+        reference_height = self._config.reference_height
+        if reference_width is None or reference_height is None:
+            return None, False
+        scale_x = frame_width / reference_width
+        scale_y = frame_height / reference_height
+        if not math.isclose(scale_x, scale_y, rel_tol=1e-6, abs_tol=1e-9):
+            return None, False
+        return (point[0] / scale_x, point[1] / scale_y), True
 
 
 def _calculate_homography(source: np.ndarray, destination: np.ndarray) -> np.ndarray:
@@ -315,6 +438,30 @@ def _perspective_transform(points: np.ndarray, matrix: np.ndarray) -> np.ndarray
     if not np.all(np.isfinite(result)):
         raise CalibrationError("projection produced non-finite values")
     return result
+
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    try:
+        import cv2
+    except ImportError:  # pragma: no cover
+        return np.empty((0, 2), dtype=np.float64)
+    return cv2.convexHull(points.astype(np.float32)).reshape(-1, 2).astype(np.float64)
+
+
+def _validation_coverage(control: np.ndarray, validation: np.ndarray) -> float:
+    """Score how broadly independent points span the fitted image region."""
+
+    control_span = np.ptp(control, axis=0)
+    validation_span = np.ptp(validation, axis=0)
+    ratios = np.divide(
+        validation_span,
+        control_span,
+        out=np.zeros_like(validation_span),
+        where=control_span > 1e-9,
+    )
+    span_score = float(np.clip(np.mean(ratios), 0.0, 1.0))
+    count_score = min(1.0, len(validation) / 4.0)
+    return span_score * count_score
 
 
 def _clamp(value: float) -> float:

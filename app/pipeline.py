@@ -9,6 +9,7 @@ from app.camera_motion import CameraMotionEstimator, CameraPoseValidator
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import Detector
 from app.events import EventArtifactWriter
+from app.geometry import GeometryIntegrityPolicy
 from app.lanes import LaneAssigner
 from app.models import PhysicalMeasurementPermission, RoadPosition, SpeedEstimate
 from app.motion import LaneTransitionDetector, MotionHistoryStore
@@ -53,6 +54,7 @@ class TrafficAnalysisPipeline:
         event_writer: EventArtifactWriter,
         annotator: DebugAnnotator,
         debug_sink: VideoSink | None,
+        geometry_integrity_policy: GeometryIntegrityPolicy,
     ) -> None:
         self._source = source
         self._detector = detector
@@ -72,6 +74,7 @@ class TrafficAnalysisPipeline:
         self._event_writer = event_writer
         self._annotator = annotator
         self._debug_sink = debug_sink
+        self._geometry_integrity_policy = geometry_integrity_policy
 
     def run(self) -> PipelineSummary:
         frame_count = 0
@@ -90,13 +93,37 @@ class TrafficAnalysisPipeline:
                     self._road_position_estimator.calibration_quality,
                     camera_pose,
                 )
+                geometry_integrity = self._geometry_integrity_policy.evaluate(
+                    self._source.info.width,
+                    self._source.info.height,
+                    camera_pose,
+                    physical_permission,
+                )
+                if not geometry_integrity.physical_measurements_allowed:
+                    physical_permission = PhysicalMeasurementPermission(
+                        allowed=False,
+                        confidence=0.0,
+                        status="unavailable_geometry_integrity",
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    *physical_permission.reason_codes,
+                                    "GEOMETRY_INTEGRITY_LOST",
+                                    *geometry_integrity.reason_codes,
+                                )
+                            )
+                        ),
+                    )
                 raw_observations = self._lane_assigner.assign(
                     vehicles,
                     frame_width=self._source.info.width,
                     frame_height=self._source.info.height,
+                    geometry_integrity=geometry_integrity,
                 )
                 lane_frame = self._lane_transition_detector.update(
-                    raw_observations, packet.timestamp_seconds
+                    raw_observations,
+                    packet.timestamp_seconds,
+                    geometry_allowed=geometry_integrity.lane_assignment_allowed,
                 )
                 observations = lane_frame.observations
                 positions = self._road_position_estimator.estimate(
@@ -121,6 +148,7 @@ class TrafficAnalysisPipeline:
                     camera_pose=camera_pose,
                     physical_measurements=physical_permission,
                     speeds=speeds,
+                    geometry_integrity=geometry_integrity,
                 )
                 traffic_context = self._right_lane_opportunities.update(
                     traffic_context, packet.timestamp_seconds

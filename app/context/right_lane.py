@@ -34,6 +34,10 @@ class RightLaneOpportunityTracker:
             CongestionLevel.DENSE,
             CongestionLevel.STOP_AND_GO,
         }
+        geometry = context.global_context.geometry_integrity
+        opportunities_allowed = (
+            geometry is not None and geometry.right_lane_opportunity_allowed
+        )
         for track_id, vehicle_context in context.vehicles.items():
             state = self._states.setdefault(
                 track_id,
@@ -48,7 +52,11 @@ class RightLaneOpportunityTracker:
                 state.available_since = None
                 state.adjacent_lane_id = vehicle_context.adjacent_right_lane_id
             neighbors = vehicle_context.neighbors
-            if vehicle_context.adjacent_right_lane_id is None:
+            if not opportunities_allowed:
+                available = None
+                confidence = 0.0
+                opportunity_mode = "unavailable_geometry"
+            elif vehicle_context.adjacent_right_lane_id is None:
                 available: bool | None = None
                 confidence = 0.0
                 opportunity_mode = "unavailable"

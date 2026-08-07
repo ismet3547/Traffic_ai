@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path,
         manifest,
         videos,
+        predictions,
         output,
         git_commit=commit,
         git_dirty=dirty,
@@ -128,6 +129,16 @@ def main(argv: list[str] | None = None) -> int:
         video.id: predictions[video.id].versions.model_dump(mode="json")
         for video in videos
     }
+    protocol = reproducibility["evaluation_protocol"]
+    print(f"Dataset fingerprint: {reproducibility['dataset_fingerprint']}")
+    print(f"Dataset identity: {reproducibility['dataset_identity_status'].upper()}")
+    print(
+        "Evaluation protocol: "
+        f"{protocol['protocol_version']} "
+        f"(matcher={protocol['matcher_semantics_version']}, "
+        f"metrics={protocol['metric_semantics_version']})"
+    )
+    print(f"Evaluation fingerprint: {reproducibility['evaluation_fingerprint']}")
     report = evaluate_benchmark(
         manifest_path,
         manifest,
@@ -155,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
             manifest.benchmark.baseline_tolerances,
             allow_incomparable=args.allow_incomparable_baseline,
         )
+        comparison = report["baseline_comparison"]
+        print(f"Comparable: {'YES' if comparison['comparison_valid'] else 'NO'}")
+        reasons = comparison.get("reason_codes") or []
+        print("Reasons: " + (", ".join(reasons) if reasons else "NONE"))
     json_path, markdown_path = write_reports(report, output)
     metrics = report["overall_metrics"]
     LOGGER.info("JSON report: %s", json_path)

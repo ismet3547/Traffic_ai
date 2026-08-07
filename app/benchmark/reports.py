@@ -184,8 +184,45 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
     else:
         lines.append("Not configured; no production-readiness threshold is assumed.")
-    lines.extend(["", "## Reproducibility", ""])
-    for key, value in sorted(report.get("reproducibility", {}).items()):
+    reproducibility = report.get("reproducibility", {})
+    protocol = reproducibility.get("evaluation_protocol") or {}
+    lines.extend(
+        [
+            "",
+            "## Benchmark identity and comparability",
+            "",
+            f"- Dataset fingerprint: `{reproducibility.get('dataset_fingerprint')}`",
+            (
+                "- Dataset identity status: "
+                f"`{reproducibility.get('dataset_identity_status', 'unverified')}`"
+            ),
+            (
+                "- Evaluation fingerprint: "
+                f"`{reproducibility.get('evaluation_fingerprint')}`"
+            ),
+            f"- Evaluation protocol: `{protocol.get('protocol_version', 'legacy/unavailable')}`",
+            (
+                "- Matcher semantics: "
+                f"`{protocol.get('matcher_semantics_version', 'legacy/unavailable')}`"
+            ),
+            (
+                "- Metric semantics: "
+                f"`{protocol.get('metric_semantics_version', 'legacy/unavailable')}`"
+            ),
+            (
+                "- Annotation ontology: "
+                f"`{protocol.get('annotation_ontology_version', 'legacy/unavailable')}`"
+            ),
+            (
+                "- Git commit (traceability only): "
+                f"`{reproducibility.get('git_commit')}`"
+            ),
+            "",
+            "## Reproducibility",
+            "",
+        ]
+    )
+    for key, value in sorted(reproducibility.items()):
         lines.append(f"- `{key}`: `{value}`")
     if report.get("baseline_comparison") is not None:
         baseline = report["baseline_comparison"]
@@ -195,6 +232,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "## Baseline comparison",
                 "",
                 f"Comparison valid: `{baseline['comparison_valid']}`",
+                f"Comparison mode: `{baseline['comparison_mode']}`",
                 f"Override used: `{baseline['override_used']}`",
                 f"Regression detected: `{baseline['regression_detected']}`",
             ]
@@ -231,17 +269,39 @@ def compare_with_baseline(
     baseline_reproducibility = baseline.get("reproducibility", {})
     current_dataset = current_reproducibility.get("dataset_fingerprint")
     baseline_dataset = baseline_reproducibility.get("dataset_fingerprint")
+    baseline_identity_status = baseline_reproducibility.get("dataset_identity_status")
     current_evaluation = current_reproducibility.get("evaluation_fingerprint")
     baseline_evaluation = baseline_reproducibility.get("evaluation_fingerprint")
+    current_protocol = current_reproducibility.get("evaluation_protocol")
+    baseline_protocol = baseline_reproducibility.get("evaluation_protocol")
     reason_codes = []
+    legacy_baseline_fields = (
+        baseline_dataset,
+        baseline_identity_status,
+        baseline_reproducibility.get("source_video_identities"),
+        baseline_evaluation,
+        baseline_protocol,
+    )
+    if any(value is None for value in legacy_baseline_fields):
+        reason_codes.append("LEGACY_BASELINE_IDENTITY_INCOMPLETE")
     if not current_dataset or current_dataset != baseline_dataset:
         reason_codes.append("DATASET_FINGERPRINT_MISMATCH")
-    if not current_evaluation or current_evaluation != baseline_evaluation:
+    if not _dataset_identity_verified(
+        current_reproducibility
+    ) or not _dataset_identity_verified(baseline_reproducibility):
+        reason_codes.append("DATASET_IDENTITY_UNVERIFIED")
+    protocols_match = bool(current_protocol) and current_protocol == baseline_protocol
+    if not protocols_match:
+        reason_codes.append("EVALUATION_PROTOCOL_MISMATCH")
+    if protocols_match and (
+        not current_evaluation or current_evaluation != baseline_evaluation
+    ):
         reason_codes.append("EVALUATION_CONFIG_MISMATCH")
     comparison_valid = not reason_codes
     if not comparison_valid and not allow_incomparable:
         return {
             "comparison_valid": False,
+            "comparison_mode": "strict_non_comparable",
             "override_used": False,
             "warning": "Baseline is non-comparable; regression deltas are suppressed.",
             "reason_codes": sorted(set(reason_codes)),
@@ -291,6 +351,11 @@ def compare_with_baseline(
     }
     return {
         "comparison_valid": comparison_valid,
+        "comparison_mode": (
+            "forced_non_comparable"
+            if allow_incomparable and not comparison_valid
+            else "strict_comparable"
+        ),
         "override_used": bool(allow_incomparable and not comparison_valid),
         "warning": (
             "NON-COMPARABLE BASELINE OVERRIDE"
@@ -304,6 +369,19 @@ def compare_with_baseline(
         "regression_detected": any(regressions.values()),
         "tolerances": tolerances.model_dump(mode="json"),
     }
+
+
+def _dataset_identity_verified(reproducibility: dict[str, Any]) -> bool:
+    identities = reproducibility.get("source_video_identities")
+    return bool(
+        reproducibility.get("dataset_identity_status") == "verified"
+        and isinstance(identities, dict)
+        and identities
+        and all(
+            isinstance(identity, dict) and identity.get("verified") is True
+            for identity in identities.values()
+        )
+    )
 
 
 def attach_failure_artifacts(

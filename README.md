@@ -362,7 +362,53 @@ Reports include overall, per-video, per-tag, confidence-stratified and policy-sp
 
 When enabled, FP/FN bundles are written under `failures/<video_id>/<failure_id>/` with diagnostic metadata and copied or extracted representative media. Categories such as `OVERTAKING_LOGIC_ERROR` and `GEOMETRY_INTEGRITY_ERROR` are heuristic suspects, not asserted root causes. Current production output has rich event-level context but no machine-readable per-frame telemetry stream, so detection misses and tracker ID switches cannot always be diagnosed automatically.
 
-Pass `--baseline previous/benchmark_report.json` to compare precision, recall, F1, FP/hour and processing FPS. Regression deltas are valid only when the evaluated dataset and evaluation protocol are comparable. Dataset fingerprints cover ordered video IDs/splits plus annotation hashes/schema versions; evaluation fingerprints cover matching, ignore/control rules, duration policy, confidence threshold, headline confidence, roles, and label set. Production configuration has a separate hash, so policy changes can be compared while the dataset/protocol remains fixed. Fingerprint mismatch suppresses ordinary deltas by default. The developer-only `--allow-incomparable-baseline` flag displays them under a prominent `NON-COMPARABLE BASELINE OVERRIDE` warning. Direction-aware tolerances avoid treating floating-point noise as regression. Optional acceptance criteria report PASS/FAIL only when explicitly configured; the repository invents no government or production-readiness threshold.
+Pass `--baseline previous/benchmark_report.json` to compare precision, recall, F1, FP/hour and processing FPS. Regression deltas are valid only when the evaluated dataset and evaluation protocol are comparable. Dataset fingerprints cover source-video content identity, ordered video IDs/splits, duration identity, and annotation hashes/schema versions; evaluation fingerprints cover explicit protocol semantics plus matching, ignore/control rules, duration policy, confidence threshold, headline confidence, roles, and label set. Production configuration has a separate hash, so policy changes can be compared while the dataset/protocol remains fixed. Fingerprint mismatch suppresses ordinary deltas by default. The developer-only `--allow-incomparable-baseline` flag displays them under a prominent `NON-COMPARABLE BASELINE OVERRIDE` warning. Direction-aware tolerances avoid treating floating-point noise as regression. Optional acceptance criteria report PASS/FAIL only when explicitly configured; the repository invents no government or production-readiness threshold.
+
+### Benchmark Identity and Comparability
+
+`video_id` is a logical key, not proof of video identity. When inference runs against
+an available source video, the benchmark streams the file through SHA-256 in bounded
+chunks and writes both `source_video_sha256` and `source_video_size_bytes` into the
+prediction cache. A later cache-only run can use that immutable evidence as
+`cached_full_sha256` when the raw file is unavailable. If the raw file is available,
+its current bytes are hashed and checked against the cache before evaluation;
+disagreement fails with `PREDICTION_CACHE_SOURCE_MISMATCH`.
+
+Legacy schema-1.0 caches without source identity still load, but their dataset status
+is `unverified`. They cannot participate in a strict comparable baseline. Re-run
+inference with the current benchmark runner to create a schema-1.1 cache containing
+the source hash and byte size. Filename, local directory, and raw-versus-cached hash
+acquisition are diagnostic provenance rather than content identity: renaming a
+byte-identical source does not change its dataset fingerprint. Full SHA-256 is
+intentionally used for official reproducibility; filename, size, and duration alone
+are never promoted to verified identity.
+
+The dataset fingerprint canonically combines, per sorted video ID, the split,
+source-video SHA-256 and byte size, cryptographic verification status, duration
+identity, and each annotation's SHA-256 and schema version. Changing either video or
+annotation bytes therefore invalidates dataset comparability. If even one video lacks
+verified source identity, `dataset_identity_status` is `unverified` and strict
+comparison fails with `DATASET_IDENTITY_UNVERIFIED`.
+
+Evaluation meaning is identified separately by protocol `4.1.1` and explicit matcher,
+metric, annotation-ontology, ignore-policy, and control-policy semantic versions. The
+current matcher version means maximum valid match cardinality first, maximum total
+temporal IoU second, with deterministic ID-based tie behavior. Metric identity covers
+zero-denominator behavior, validated rate denominators, ignored-prediction accounting,
+and confidence-filtered accounting. The evaluation fingerprint combines those semantic
+versions with all evaluation settings and role/label policies. A semantic-version
+change produces `EVALUATION_PROTOCOL_MISMATCH`; a settings-only change under the same
+protocol produces `EVALUATION_CONFIG_MISMATCH`.
+
+Two benchmark runs are not comparable merely because they use the same video IDs and YAML thresholds. Changing the event-matching algorithm changes the evaluation protocol even if every configuration value remains identical.
+
+Production configuration remains separately hashed so a left-lane-policy change can
+be measured on the same verified dataset and evaluation protocol. The Git commit is
+reported for traceability, but it is not proof of either dataset or evaluation
+compatibility. Historical reports lacking source identity or protocol metadata are
+handled as legacy and fail closed with `LEGACY_BASELINE_IDENTITY_INCOMPLETE`. The
+developer override may display diagnostic deltas, but `comparison_valid` remains false
+and `comparison_mode` is `forced_non_comparable`.
 
 No real-world accuracy claim should be made until a sufficiently diverse, independently annotated test set has been evaluated.
 

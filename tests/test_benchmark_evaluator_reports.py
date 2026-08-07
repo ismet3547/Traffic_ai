@@ -36,6 +36,7 @@ def _synthetic_report(tmp_path: Path):
         MANIFEST,
         manifest,
         videos,
+        predictions,
         tmp_path,
         git_commit="abc123",
     )
@@ -71,8 +72,13 @@ def test_report_serialization_is_deterministic_and_labeled_synthetic(tmp_path) -
     second_json, second_markdown = write_reports(report, tmp_path / "second")
     assert first_json.read_bytes() == second_json.read_bytes()
     assert first_markdown.read_bytes() == second_markdown.read_bytes()
-    assert "SYNTHETIC INTEGRITY TEST - NOT REAL-WORLD PERFORMANCE" in render_markdown(
-        report
+    markdown = render_markdown(report)
+    assert "SYNTHETIC INTEGRITY TEST - NOT REAL-WORLD PERFORMANCE" in markdown
+    assert "## Benchmark identity and comparability" in markdown
+    assert "Dataset identity status: `unverified`" in markdown
+    assert "Evaluation protocol: `4.1.1`" in markdown
+    assert "maximum_cardinality_then_maximum_total_temporal_iou_deterministic_v2" in (
+        markdown
     )
 
 
@@ -84,12 +90,30 @@ def test_reproducibility_snapshot_contains_config_hash_and_versions(tmp_path) ->
     assert len(reproducibility["dataset_fingerprint"]) == 64
     assert len(reproducibility["evaluation_fingerprint"]) == 64
     assert len(reproducibility["production_config_hash_sha256"]) == 64
+    assert reproducibility["dataset_identity_status"] == "unverified"
+    assert reproducibility["evaluation_protocol"]["protocol_version"] == "4.1.1"
+    assert (
+        reproducibility["source_video_identities"]["synthetic_video_a"]["identity_mode"]
+        == "unverified"
+    )
     assert reproducibility["annotation_schema_versions"] == ["1.0"]
     assert (tmp_path / "resolved_config.yaml").is_file()
 
 
 def test_baseline_comparison_uses_directional_tolerances(tmp_path) -> None:
     _, report = _synthetic_report(tmp_path)
+    report["reproducibility"]["dataset_identity_status"] = "verified"
+    report["reproducibility"]["source_video_identities"] = {
+        "synthetic_video_a": {
+            "video_id": "synthetic_video_a",
+            "source_path": None,
+            "sha256": "a" * 64,
+            "size_bytes": 1,
+            "identity_mode": "cached_full_sha256",
+            "verified": True,
+            "reason_codes": [],
+        }
+    }
     baseline = json.loads(json.dumps(report))
     baseline["overall_metrics"]["precision"] = 0.8
     comparison = compare_with_baseline(
@@ -162,5 +186,39 @@ def test_skip_inference_cli_evaluates_prediction_cache(tmp_path, capsys) -> None
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "TP=2 FP=4 FN=1" in output
+    assert "Dataset identity: UNVERIFIED" in output
+    assert "Evaluation protocol: 4.1.1" in output
     report = json.loads((tmp_path / "benchmark_report.json").read_text())
     assert report["overall_metrics"]["f1"] == pytest.approx(4 / 9)
+
+
+def test_cli_prints_strict_baseline_comparability_and_reasons(tmp_path, capsys) -> None:
+    baseline_output = tmp_path / "baseline"
+    current_output = tmp_path / "current"
+    common = [
+        "--manifest",
+        str(MANIFEST),
+        "--predictions-dir",
+        str(PREDICTIONS),
+        "--skip-inference",
+        "--no-failure-artifacts",
+        "--split",
+        "validation",
+    ]
+    assert run_benchmark_main([*common, "--output", str(baseline_output)]) == 0
+    capsys.readouterr()
+    assert (
+        run_benchmark_main(
+            [
+                *common,
+                "--output",
+                str(current_output),
+                "--baseline",
+                str(baseline_output / "benchmark_report.json"),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Comparable: NO" in output
+    assert "Reasons: DATASET_IDENTITY_UNVERIFIED" in output

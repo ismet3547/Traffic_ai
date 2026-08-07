@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import logging
@@ -21,7 +20,10 @@ from app.benchmark.annotations import resolve_manifest_path
 from app.benchmark.fingerprints import (
     canonical_sha256,
     dataset_fingerprint_payload,
+    dataset_identity_status,
     evaluation_fingerprint_payload,
+    resolve_video_identities,
+    streaming_file_sha256,
 )
 from app.benchmark.models import (
     BenchmarkManifest,
@@ -30,6 +32,7 @@ from app.benchmark.models import (
     RuntimePerformance,
     VersionMetadata,
 )
+from app.benchmark.protocol import current_evaluation_protocol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +63,8 @@ def run_video_inference(
         raise FileNotFoundError(f"benchmark video not found: {source}")
     if not config.is_file():
         raise FileNotFoundError(f"production config not found: {config}")
+    source_video_sha256 = streaming_file_sha256(source)
+    source_video_size_bytes = source.stat().st_size
 
     inference_base = Path(output_directory) / "inference_runs" / video.id
     inference_base.mkdir(parents=True, exist_ok=True)
@@ -127,6 +132,8 @@ def run_video_inference(
         run_directory,
         video_id=video.id,
         source_file=source.name,
+        source_video_sha256=source_video_sha256,
+        source_video_size_bytes=source_video_size_bytes,
         performance=performance,
         versions=versions,
     )
@@ -194,6 +201,7 @@ def build_reproducibility_snapshot(
     manifest_path: str | Path,
     manifest: BenchmarkManifest,
     videos: list[ManifestVideo],
+    predictions: dict[str, PredictionDocument],
     output_directory: str | Path,
     *,
     git_commit: str | None,
@@ -203,6 +211,7 @@ def build_reproducibility_snapshot(
     identifiers: dict[str, Any] = {}
     annotation_versions: set[str] = set()
     annotation_hashes: dict[str, str] = {}
+    annotation_identities: dict[str, dict[str, str]] = {}
     for video in videos:
         if video.config is not None:
             config_path = resolve_manifest_path(manifest_path, video.config)
@@ -214,24 +223,33 @@ def build_reproducibility_snapshot(
             path = resolve_manifest_path(manifest_path, annotation_path)
             if path.is_file():
                 with path.open("r", encoding="utf-8") as stream:
-                    annotation_versions.add(
-                        str(json.load(stream).get("schema_version"))
-                    )
+                    schema_version = str(json.load(stream).get("schema_version"))
+                annotation_versions.add(schema_version)
+                annotation_sha256 = file_sha256(path)
                 annotation_hashes[f"{video.id}:{annotation_index}:{path.name}"] = (
-                    file_sha256(path)
+                    annotation_sha256
                 )
+                annotation_identities[f"{video.id}:{annotation_index}"] = {
+                    "sha256": annotation_sha256,
+                    "schema_version": schema_version,
+                }
     snapshot = {
         "benchmark_manifest": manifest.model_dump(mode="json"),
         "production_configs": dict(sorted(production_configs.items())),
     }
     resolved_config_hash = canonical_sha256(snapshot)
+    video_identities = resolve_video_identities(manifest_path, videos, predictions)
+    identity_status = dataset_identity_status(video_identities)
     dataset_payload = dataset_fingerprint_payload(
-        manifest_path,
         videos,
-        annotation_hashes,
-        sorted(annotation_versions),
+        annotation_identities,
+        video_identities,
+        predictions,
     )
-    evaluation_payload = evaluation_fingerprint_payload(manifest.benchmark)
+    evaluation_protocol = current_evaluation_protocol()
+    evaluation_payload = evaluation_fingerprint_payload(
+        manifest.benchmark, evaluation_protocol
+    )
     production_config_hash = canonical_sha256(dict(sorted(production_configs.items())))
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
@@ -245,8 +263,14 @@ def build_reproducibility_snapshot(
         "production_config_hash_sha256": production_config_hash,
         "dataset_fingerprint": canonical_sha256(dataset_payload),
         "dataset_fingerprint_payload": dataset_payload,
+        "dataset_identity_status": identity_status.value,
+        "source_video_identities": {
+            video_id: identity.model_dump(mode="json")
+            for video_id, identity in sorted(video_identities.items())
+        },
         "evaluation_fingerprint": canonical_sha256(evaluation_payload),
         "evaluation_fingerprint_payload": evaluation_payload,
+        "evaluation_protocol": evaluation_protocol.model_dump(mode="json"),
         "benchmark_schema_version": manifest.schema_version,
         "annotation_schema_versions": sorted(annotation_versions),
         "annotation_hashes_sha256": dict(sorted(annotation_hashes.items())),
@@ -256,11 +280,7 @@ def build_reproducibility_snapshot(
 
 
 def file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return streaming_file_sha256(path)
 
 
 def hardware_metadata(configured_device: str | None = None) -> dict[str, Any]:

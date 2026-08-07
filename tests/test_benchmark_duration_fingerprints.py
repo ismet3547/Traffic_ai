@@ -11,7 +11,11 @@ from app.benchmark.models import (
     DurationEvidence,
     DurationValidationConfig,
     ManifestVideo,
+    PredictionDocument,
+    VideoIdentity,
+    VideoIdentityMode,
 )
+from app.benchmark.protocol import current_evaluation_protocol
 from app.benchmark.reports import compare_with_baseline
 
 
@@ -20,6 +24,7 @@ def _duration(source: str, seconds: float, confidence: str):
 
 
 def _report(dataset: str = "dataset-a", evaluation: str = "evaluation-a"):
+    protocol = current_evaluation_protocol().model_dump(mode="json")
     return {
         "overall_metrics": {
             "precision": 0.8,
@@ -31,10 +36,52 @@ def _report(dataset: str = "dataset-a", evaluation: str = "evaluation-a"):
         "policy_specific_metrics": {"overtake_false_positive_rate": 0.1},
         "reproducibility": {
             "dataset_fingerprint": dataset,
+            "dataset_identity_status": "verified",
+            "source_video_identities": {
+                "a": {
+                    "video_id": "a",
+                    "sha256": "a" * 64,
+                    "size_bytes": 1,
+                    "identity_mode": "full_sha256",
+                    "verified": True,
+                    "reason_codes": [],
+                    "source_path": None,
+                }
+            },
             "evaluation_fingerprint": evaluation,
+            "evaluation_protocol": protocol,
             "production_config_hash_sha256": "production-a",
         },
     }
+
+
+def _dataset_payload(videos: list[ManifestVideo], annotation_hashes: dict[str, str]):
+    identities = {
+        video.id: VideoIdentity(
+            video_id=video.id,
+            sha256=(video.id[0] * 64),
+            size_bytes=1,
+            identity_mode=VideoIdentityMode.FULL_SHA256,
+            verified=True,
+        )
+        for video in videos
+    }
+    predictions = {
+        video.id: PredictionDocument(
+            video_id=video.id,
+            source_video_sha256=identities[video.id].sha256,
+            source_video_size_bytes=1,
+        )
+        for video in videos
+    }
+    annotations = {
+        f"{video.id}:0": {
+            "sha256": annotation_hashes[video.id],
+            "schema_version": "1.0",
+        }
+        for video in videos
+    }
+    return dataset_fingerprint_payload(videos, annotations, identities, predictions)
 
 
 def test_gross_manifest_vs_video_metadata_duration_mismatch_fails() -> None:
@@ -88,20 +135,10 @@ def test_same_dataset_and_evaluation_protocol_are_comparable() -> None:
     assert comparison["deltas"]["precision"] == 0.0
 
 
-def test_changed_annotation_hash_is_not_comparable(tmp_path) -> None:
+def test_changed_annotation_hash_is_not_comparable() -> None:
     video = ManifestVideo(id="a", annotation="a.json")
-    first_payload = dataset_fingerprint_payload(
-        tmp_path / "manifest.yaml",
-        [video],
-        {"a:0:a.json": "annotation-hash-a"},
-        ["1.0"],
-    )
-    second_payload = dataset_fingerprint_payload(
-        tmp_path / "manifest.yaml",
-        [video],
-        {"a:0:a.json": "annotation-hash-b"},
-        ["1.0"],
-    )
+    first_payload = _dataset_payload([video], {"a": "annotation-hash-a"})
+    second_payload = _dataset_payload([video], {"a": "annotation-hash-b"})
     current = _report(dataset=canonical_sha256(first_payload))
     baseline = _report(dataset=canonical_sha256(second_payload))
     comparison = compare_with_baseline(current, baseline, BaselineTolerances())
@@ -110,19 +147,15 @@ def test_changed_annotation_hash_is_not_comparable(tmp_path) -> None:
     assert comparison["deltas"] == {}
 
 
-def test_changed_video_set_is_not_comparable(tmp_path) -> None:
+def test_changed_video_set_is_not_comparable() -> None:
     video_a = ManifestVideo(id="a", annotation="a.json")
     video_b = ManifestVideo(id="b", annotation="b.json")
     annotation_hashes = {
-        "a:0:a.json": "annotation-hash-a",
-        "b:0:b.json": "annotation-hash-b",
+        "a": "annotation-hash-a",
+        "b": "annotation-hash-b",
     }
-    first_payload = dataset_fingerprint_payload(
-        tmp_path / "manifest.yaml", [video_a], annotation_hashes, ["1.0"]
-    )
-    second_payload = dataset_fingerprint_payload(
-        tmp_path / "manifest.yaml", [video_a, video_b], annotation_hashes, ["1.0"]
-    )
+    first_payload = _dataset_payload([video_a], annotation_hashes)
+    second_payload = _dataset_payload([video_a, video_b], annotation_hashes)
     comparison = compare_with_baseline(
         _report(dataset=canonical_sha256(first_payload)),
         _report(dataset=canonical_sha256(second_payload)),

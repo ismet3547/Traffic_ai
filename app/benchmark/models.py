@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ANNOTATION_SCHEMA_VERSION: Final = "1.0"
 BENCHMARK_SCHEMA_VERSION: Final = "1.0"
-PREDICTION_SCHEMA_VERSION: Final = "1.0"
+PREDICTION_SCHEMA_VERSION: Final = "1.1"
 
 
 class StrictModel(BaseModel):
@@ -62,6 +62,62 @@ class DatasetSplit(str, Enum):
     DEVELOPMENT = "development"
     VALIDATION = "validation"
     TEST = "test"
+
+
+class VideoIdentityMode(str, Enum):
+    FULL_SHA256 = "full_sha256"
+    CACHED_FULL_SHA256 = "cached_full_sha256"
+    METADATA_ONLY = "metadata_only"
+    UNVERIFIED = "unverified"
+
+
+class DatasetIdentityStatus(str, Enum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+
+
+class VideoIdentity(StrictModel):
+    video_id: str = Field(min_length=1)
+    source_path: str | None = None
+    sha256: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+    identity_mode: VideoIdentityMode
+    verified: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> VideoIdentity:
+        if (self.sha256 is None) != (self.size_bytes is None):
+            raise ValueError("video SHA-256 and size_bytes must be supplied together")
+        if self.sha256 is not None and (
+            len(self.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.sha256)
+        ):
+            raise ValueError(
+                "video SHA-256 must be 64 lowercase hexadecimal characters"
+            )
+        if self.verified and (
+            self.sha256 is None
+            or self.identity_mode
+            not in {
+                VideoIdentityMode.FULL_SHA256,
+                VideoIdentityMode.CACHED_FULL_SHA256,
+            }
+        ):
+            raise ValueError("verified video identity requires a full SHA-256")
+        if self.identity_mode == VideoIdentityMode.UNVERIFIED and self.verified:
+            raise ValueError("unverified identity mode cannot be marked verified")
+        self.reason_codes = list(dict.fromkeys(self.reason_codes))
+        return self
+
+
+class EvaluationProtocolIdentity(StrictModel):
+    protocol_version: str = Field(min_length=1)
+    matcher_semantics_version: str = Field(min_length=1)
+    metric_semantics_version: str = Field(min_length=1)
+    annotation_ontology_version: str = Field(min_length=1)
+    ignore_policy_version: str = Field(min_length=1)
+    control_event_policy_version: str = Field(min_length=1)
 
 
 class GroundTruthEvent(StrictModel):
@@ -295,9 +351,11 @@ class PredictedEvent(StrictModel):
 
 
 class PredictionDocument(StrictModel):
-    schema_version: Literal["1.0"] = PREDICTION_SCHEMA_VERSION
+    schema_version: Literal["1.0", "1.1"] = PREDICTION_SCHEMA_VERSION
     video_id: str = Field(min_length=1)
     source_file: str | None = None
+    source_video_sha256: str | None = None
+    source_video_size_bytes: int | None = Field(default=None, ge=0)
     predictions: list[PredictedEvent] = Field(default_factory=list)
     cancelled_event_count: int = Field(default=0, ge=0)
     performance: RuntimePerformance | None = None
@@ -305,6 +363,20 @@ class PredictionDocument(StrictModel):
 
     @model_validator(mode="after")
     def validate_predictions(self) -> PredictionDocument:
+        if (self.source_video_sha256 is None) != (self.source_video_size_bytes is None):
+            raise ValueError(
+                "source_video_sha256 and source_video_size_bytes must be supplied together"
+            )
+        if self.source_video_sha256 is not None and (
+            len(self.source_video_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.source_video_sha256
+            )
+        ):
+            raise ValueError(
+                "source_video_sha256 must be 64 lowercase hexadecimal characters"
+            )
         identifiers = [prediction.event_id for prediction in self.predictions]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("prediction event IDs must be unique")

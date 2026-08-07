@@ -6,12 +6,17 @@ from app.benchmark.models import (
     AnnotationLabel,
     AnnotationRole,
     BenchmarkManifest,
+    DatasetIdentityStatus,
+    EvaluationProtocolIdentity,
     GroundTruthEvent,
     ManifestVideo,
     MetricSummary,
     PredictedEvent,
     PredictionDocument,
+    VideoIdentity,
+    VideoIdentityMode,
 )
+from app.benchmark.protocol import current_evaluation_protocol
 
 __all__ = [
     "AnnotationConfidence",
@@ -19,9 +24,14 @@ __all__ = [
     "AnnotationLabel",
     "AnnotationRole",
     "BenchmarkManifest",
+    "DatasetIdentityStatus",
+    "EvaluationProtocolIdentity",
     "GroundTruthEvent",
     "ManifestVideo",
     "MetricSummary",
     "PredictedEvent",
     "PredictionDocument",
+    "VideoIdentity",
+    "VideoIdentityMode",
+    "current_evaluation_protocol",
 ]

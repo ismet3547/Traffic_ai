@@ -108,6 +108,8 @@ def prediction_document_from_run(
     *,
     video_id: str,
     source_file: str | None,
+    source_video_sha256: str | None = None,
+    source_video_size_bytes: int | None = None,
     performance: RuntimePerformance | None = None,
     versions: VersionMetadata | None = None,
 ) -> PredictionDocument:
@@ -134,6 +136,8 @@ def prediction_document_from_run(
     return PredictionDocument(
         video_id=video_id,
         source_file=source_file,
+        source_video_sha256=source_video_sha256,
+        source_video_size_bytes=source_video_size_bytes,
         predictions=predictions,
         cancelled_event_count=_count_jsonl(run_path / "cancelled_events.jsonl"),
         performance=performance,

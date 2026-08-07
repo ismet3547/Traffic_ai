@@ -24,4 +24,22 @@ Annotation labels:
 
 Confidence does not change semantic role. A tiny overlap with an ignored annotation is not sufficient to remove a prediction from false-positive accounting. All ignored and confidence-filtered predictions remain in detailed report accounting.
 
+## Identity and cache migration
+
+A video ID or filename is not content identity. New inference-generated prediction
+caches use schema 1.1 and preserve the source video's streaming SHA-256 plus byte size.
+Cache-only evaluation uses this evidence when the raw source is unavailable and checks
+it against current raw bytes when the file is present. A mismatch stops evaluation.
+
+Legacy caches without these fields remain readable but make the dataset identity
+`unverified`, so strict baseline comparison is disabled. Re-run inference to migrate
+such caches. The committed synthetic cache intentionally has no real source video and
+therefore remains unverified; it tests metric integrity and makes no official
+comparability or real-world performance claim.
+
+Dataset fingerprints combine source content identity with current annotation hashes.
+Evaluation fingerprints separately include protocol `4.1.1`, component semantic
+versions, and evaluation settings. Production-policy hashes remain separate so policy
+changes can be measured without pretending that protocol changes are model changes.
+
 Use anonymous identifiers such as `annotator_a`; do not put personal information, plate text, faces, or identity data in annotations.

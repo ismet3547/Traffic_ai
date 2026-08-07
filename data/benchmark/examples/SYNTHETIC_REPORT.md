@@ -15,5 +15,7 @@ Exact accounting over the 200-second fixture:
 - The mostly-contained ignore prediction has 100% prediction coverage and is retained in ignored-prediction diagnostics.
 - One of two overtaking controls is a suppression failure; the congestion control is not.
 - The manifest and annotation durations agree at 200 seconds, producing `consistent_multiple_sources` and medium denominator confidence.
+- Evaluation protocol is `4.1.1`; matcher semantics are `maximum_cardinality_then_maximum_total_temporal_iou_deterministic_v2`.
+- Dataset identity is `unverified` because this integrity fixture has no source-video bytes. It is intentionally ineligible for strict regression comparison.
 
 Recreate the full deterministic JSON and Markdown output with the synthetic replay command in the root README.

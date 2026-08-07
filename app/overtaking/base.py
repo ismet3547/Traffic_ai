@@ -8,6 +8,7 @@ from app.models import (
     LaneObservation,
     LaneTransition,
     OvertakingAssessment,
+    SpeedEstimate,
     TrafficFrameContext,
 )
 from app.motion import MotionHistoryStore
@@ -21,6 +22,7 @@ class OvertakingClearancePolicy(Protocol):
         transitions: list[LaneTransition],
         context: TrafficFrameContext,
         history: MotionHistoryStore,
+        speeds: dict[int, SpeedEstimate] | None = None,
     ) -> dict[int, OvertakingAssessment]:
         """Assess overtaking behavior for visible tracks."""
         ...

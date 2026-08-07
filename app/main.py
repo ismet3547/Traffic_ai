@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.camera_motion import build_camera_motion_estimator
 from app.config import AppConfig, load_config
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import UltralyticsDetector
@@ -15,8 +16,9 @@ from app.lanes import LaneAssigner
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import ContextualOvertakingPolicy, NoOvertakingPolicy
 from app.pipeline import TrafficAnalysisPipeline
-from app.positioning import NormalizedImageRoadPositionEstimator
+from app.positioning import build_road_coordinate_transformer
 from app.rules import ContextualLeftLaneDecisionPolicy, LeftLaneRuleEngine
+from app.speed import RollingSpeedEstimator
 from app.tracking import ByteTrackVehicleTracker
 from app.video import OpenCVVideoSink, OpenCVVideoSource
 from app.video.annotation import DebugAnnotator
@@ -65,9 +67,19 @@ def main() -> int:
         tracker = ByteTrackVehicleTracker(config.tracker, source.info.fps)
         lane_assigner = LaneAssigner(config.lanes)
         lane_transition_detector = LaneTransitionDetector(config.lane_change)
-        road_position_estimator = NormalizedImageRoadPositionEstimator(
-            config.road_position
+        road_position_estimator = build_road_coordinate_transformer(
+            config.calibration, config.road_position
         )
+        calibration_status = road_position_estimator.calibration_status
+        LOGGER.info(
+            "Calibration: mode=%s valid=%s confidence=%.2f reason=%s",
+            calibration_status.mode,
+            calibration_status.valid,
+            calibration_status.confidence,
+            calibration_status.reason or "none",
+        )
+        speed_estimator = RollingSpeedEstimator(config.speed_estimation)
+        camera_motion_estimator = build_camera_motion_estimator(config.camera_motion)
         motion_history = MotionHistoryStore(config.traffic_context)
         traffic_context_analyzer = TrafficContextAnalyzer(
             config.lanes.lane_ids_left_to_right,
@@ -90,11 +102,14 @@ def main() -> int:
             config.rules.left_lane,
             config.traffic_context,
             config.right_lane_opportunity,
+            config.calibration,
         )
         rule_engine = LeftLaneRuleEngine(
-            config.rules.left_lane, decision_policy=decision_policy
+            config.rules.left_lane,
+            decision_policy=decision_policy,
+            lifecycle_config=config.candidate_lifecycle,
         )
-        annotator = DebugAnnotator(lane_assigner)
+        annotator = DebugAnnotator(lane_assigner, config.output)
         event_writer = EventArtifactWriter(
             run_directory=run_directory,
             output_config=config.output,
@@ -117,6 +132,8 @@ def main() -> int:
             lane_assigner=lane_assigner,
             lane_transition_detector=lane_transition_detector,
             road_position_estimator=road_position_estimator,
+            speed_estimator=speed_estimator,
+            camera_motion_estimator=camera_motion_estimator,
             motion_history=motion_history,
             traffic_context_analyzer=traffic_context_analyzer,
             right_lane_opportunities=right_lane_opportunities,
@@ -132,10 +149,11 @@ def main() -> int:
         source.close()
         raise
     LOGGER.info(
-        "Done: %d frames, %.1fs video, %d review candidate(s)",
+        "Done: %d frames, %.1fs video, %d review candidate(s), %d cancelled",
         summary.frames_processed,
         summary.duration_seconds,
         summary.review_candidates,
+        summary.cancelled_candidates,
     )
     return 0
 

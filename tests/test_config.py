@@ -15,6 +15,18 @@ def test_default_config_loads() -> None:
     assert config.rules.left_lane.overtaking_clearance_mode == "contextual"
     assert config.traffic_context.history_seconds == 12.0
     assert config.right_lane_opportunity.front_gap_normalized == 0.08
+    assert config.calibration.mode == "normalized"
+    assert config.speed_estimation.enabled
+    assert config.candidate_lifecycle.finalize_after_seconds == 5.0
+
+
+def test_calibrated_example_config_loads() -> None:
+    path = Path(__file__).resolve().parents[1] / "configs" / "calibrated_example.yaml"
+    config = load_config(path)
+
+    assert config.calibration.mode == "homography"
+    assert len(config.calibration.image_points) == 4
+    assert config.calibration.world_units == "meters"
 
 
 def test_rule_lane_must_be_marked_leftmost() -> None:

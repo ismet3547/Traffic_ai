@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.config import (
+    CalibrationConfig,
     LeftLaneRuleConfig,
     RightLaneOpportunityConfig,
     TrafficContextConfig,
@@ -15,6 +16,7 @@ from app.models import (
     OvertakingAssessment,
     OvertakingStatus,
     ReviewReasonCode,
+    SpeedEstimate,
     SuppressionReason,
     VehicleTrafficContext,
 )
@@ -28,10 +30,12 @@ class ContextualLeftLaneDecisionPolicy:
         rule_config: LeftLaneRuleConfig,
         context_config: TrafficContextConfig,
         opportunity_config: RightLaneOpportunityConfig,
+        calibration_config: CalibrationConfig | None = None,
     ) -> None:
         self._rule = rule_config
         self._context = context_config
         self._opportunity = opportunity_config
+        self._calibration = calibration_config or CalibrationConfig()
 
     def decide(
         self,
@@ -41,7 +45,43 @@ class ContextualLeftLaneDecisionPolicy:
         traffic: GlobalTrafficContext | None,
         vehicle_context: VehicleTrafficContext | None,
         overtaking: OvertakingAssessment | None,
+        speed: SpeedEstimate | None = None,
     ) -> CandidateDecision:
+        calibration = traffic.calibration_status if traffic is not None else None
+        if (
+            self._calibration.suppress_candidates_when_unreliable
+            and calibration is not None
+            and calibration.mode in {"homography", "homography_fallback"}
+            and (
+                not calibration.valid
+                or calibration.confidence
+                < self._calibration.minimum_confidence_for_physical_measurements
+            )
+        ):
+            return _suppressed(
+                BehaviorClassification.INSUFFICIENT_EVIDENCE,
+                SuppressionReason.CALIBRATION_UNRELIABLE,
+                calibration.confidence,
+            )
+        if (
+            traffic is not None
+            and traffic.camera_motion is not None
+            and traffic.camera_motion.valid
+            and traffic.camera_motion.level == "high"
+        ):
+            return _suppressed(
+                BehaviorClassification.INSUFFICIENT_EVIDENCE,
+                SuppressionReason.CAMERA_MOTION_HIGH,
+                traffic.camera_motion.confidence,
+            )
+        if speed is not None and speed.speed_mode in {
+            "rejected_position_jump",
+            "rejected_unreasonable_speed",
+        }:
+            return _suppressed(
+                BehaviorClassification.INSUFFICIENT_EVIDENCE,
+                SuppressionReason.UNSTABLE_TRACK,
+            )
         if traffic is not None and traffic.congestion_level in {
             CongestionLevel.DENSE,
             CongestionLevel.STOP_AND_GO,

@@ -211,6 +211,45 @@ def test_dense_traffic_suppresses_candidate() -> None:
     assert evaluation.statuses[1].behavior_classification == "congestion"
 
 
+def test_active_candidate_suspends_then_resumes_after_temporary_congestion() -> None:
+    harness = _Harness(dense_count_per_lane=1)
+    harness.step(0.0, [_Spec(1, "left", 0.20)])
+    harness.step(0.4, [_Spec(1, "left", 0.25)])
+    harness.step(0.6, [_Spec(1, "left", 0.28)])
+    dense = [
+        _Spec(1, "left", 0.30),
+        _Spec(2, "center", 0.31),
+        _Spec(3, "right", 0.32),
+    ]
+    suspended = harness.step(0.8, dense)
+    harness.step(1.0, [_Spec(1, "left", 0.32)])
+    resumed = harness.step(1.5, [_Spec(1, "left", 0.36)])
+
+    assert suspended.transitions[0].transition == "suspended"
+    assert suspended.statuses[1].candidate_lifecycle_state == "suspended"
+    assert resumed.transitions[0].transition == "resumed"
+    assert resumed.statuses[1].candidate_lifecycle_state == "candidate_active"
+
+
+def test_active_candidate_cancels_after_persistent_congestion() -> None:
+    harness = _Harness(dense_count_per_lane=1)
+    harness.step(0.0, [_Spec(1, "left", 0.20)])
+    harness.step(0.4, [_Spec(1, "left", 0.25)])
+    harness.step(0.6, [_Spec(1, "left", 0.28)])
+    dense = [
+        _Spec(1, "left", 0.30),
+        _Spec(2, "center", 0.31),
+        _Spec(3, "right", 0.32),
+    ]
+    harness.step(0.8, dense)
+    cancelled = harness.step(2.8, dense)
+
+    assert cancelled.transitions[0].transition == "cancelled"
+    assert cancelled.transitions[0].cancellation_reason == "CONGESTION"
+    assert cancelled.statuses[1].candidate_lifecycle_state == "cancelled"
+    assert not cancelled.statuses[1].is_review_candidate
+
+
 def test_blocked_adjacent_right_lane_suppresses_candidate() -> None:
     harness = _Harness()
     frames = [

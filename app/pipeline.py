@@ -5,14 +5,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.camera_motion import CameraMotionEstimator
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import Detector
 from app.events import EventArtifactWriter
 from app.lanes import LaneAssigner
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import OvertakingClearancePolicy
-from app.positioning import RoadPositionEstimator
+from app.positioning import RoadCoordinateTransformer
 from app.rules import LeftLaneRuleEngine
+from app.speed import SpeedEstimator
 from app.tracking import VehicleTracker
 from app.video.annotation import DebugAnnotator
 from app.video.protocols import FrameSource, VideoSink
@@ -25,6 +27,7 @@ class PipelineSummary:
     frames_processed: int
     duration_seconds: float
     review_candidates: int
+    cancelled_candidates: int = 0
 
 
 class TrafficAnalysisPipeline:
@@ -35,7 +38,9 @@ class TrafficAnalysisPipeline:
         tracker: VehicleTracker,
         lane_assigner: LaneAssigner,
         lane_transition_detector: LaneTransitionDetector,
-        road_position_estimator: RoadPositionEstimator,
+        road_position_estimator: RoadCoordinateTransformer,
+        speed_estimator: SpeedEstimator,
+        camera_motion_estimator: CameraMotionEstimator,
         motion_history: MotionHistoryStore,
         traffic_context_analyzer: TrafficContextAnalyzer,
         right_lane_opportunities: RightLaneOpportunityTracker,
@@ -51,6 +56,8 @@ class TrafficAnalysisPipeline:
         self._lane_assigner = lane_assigner
         self._lane_transition_detector = lane_transition_detector
         self._road_position_estimator = road_position_estimator
+        self._speed_estimator = speed_estimator
+        self._camera_motion_estimator = camera_motion_estimator
         self._motion_history = motion_history
         self._traffic_context_analyzer = traffic_context_analyzer
         self._right_lane_opportunities = right_lane_opportunities
@@ -67,6 +74,9 @@ class TrafficAnalysisPipeline:
             for packet in self._source:
                 detections = self._detector.detect(packet.image)
                 vehicles = self._tracker.update(detections)
+                camera_motion = self._camera_motion_estimator.update(
+                    packet.image, [vehicle.bbox for vehicle in vehicles]
+                )
                 raw_observations = self._lane_assigner.assign(
                     vehicles,
                     frame_width=self._source.info.width,
@@ -81,11 +91,17 @@ class TrafficAnalysisPipeline:
                     frame_width=self._source.info.width,
                     frame_height=self._source.info.height,
                 )
+                speeds = self._speed_estimator.update(
+                    packet.timestamp_seconds, positions, camera_motion
+                )
                 traffic_context = self._traffic_context_analyzer.analyze(
                     packet.timestamp_seconds,
                     observations,
                     positions,
                     self._motion_history,
+                    calibration_status=self._road_position_estimator.calibration_status,
+                    camera_motion=camera_motion,
+                    speeds=speeds,
                 )
                 traffic_context = self._right_lane_opportunities.update(
                     traffic_context, packet.timestamp_seconds
@@ -97,6 +113,7 @@ class TrafficAnalysisPipeline:
                     positions=positions,
                     vehicle_contexts=traffic_context.vehicles,
                     transitions=lane_frame.transitions,
+                    speed_estimates=speeds,
                 )
                 overtaking_assessments = self._overtaking_policy.update(
                     timestamp_seconds=packet.timestamp_seconds,
@@ -104,6 +121,7 @@ class TrafficAnalysisPipeline:
                     transitions=lane_frame.transitions,
                     context=traffic_context,
                     history=self._motion_history,
+                    speeds=speeds,
                 )
                 evaluation = self._rule_engine.evaluate(
                     observations,
@@ -147,4 +165,5 @@ class TrafficAnalysisPipeline:
             frames_processed=frame_count,
             duration_seconds=last_timestamp,
             review_candidates=self._event_writer.completed_count,
+            cancelled_candidates=self._event_writer.cancelled_count,
         )

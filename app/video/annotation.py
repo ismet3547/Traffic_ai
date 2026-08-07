@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import numpy as np
 
+from app.config import OutputConfig
 from app.lanes import LaneAssigner
-from app.models import LaneObservation, TrafficFrameContext, VehicleRuleStatus
+from app.models import (
+    GapEstimate,
+    LaneObservation,
+    TrafficFrameContext,
+    VehicleRuleStatus,
+)
 
 
 class DebugAnnotator:
-    def __init__(self, lane_assigner: LaneAssigner) -> None:
+    def __init__(
+        self, lane_assigner: LaneAssigner, output_config: OutputConfig | None = None
+    ) -> None:
         try:
             import cv2
         except ImportError as exc:  # pragma: no cover - environment dependent
@@ -18,6 +26,7 @@ class DebugAnnotator:
             ) from exc
         self._cv2 = cv2
         self._lane_assigner = lane_assigner
+        self._config = output_config or OutputConfig()
 
     def annotate(
         self,
@@ -56,10 +65,22 @@ class DebugAnnotator:
 
         if traffic_context is not None:
             traffic = traffic_context.global_context
+            calibration = traffic.calibration_status
+            motion = traffic.camera_motion
+            calibration_label = (
+                f"{calibration.mode.upper()}/{_quality(calibration.confidence)}"
+                if calibration is not None
+                else "UNKNOWN"
+            )
+            motion_label = (
+                motion.level.upper()
+                if motion is not None and motion.valid
+                else "UNKNOWN"
+            )
             traffic_label = (
                 f"TRAFFIC: {traffic.congestion_level.value.upper()}  "
                 f"DENSITY: {traffic.traffic_density:.2f}  "
-                f"COORDS: {traffic.coordinate_system.upper()}"
+                f"CALIBRATION: {calibration_label}  CAMERA MOTION: {motion_label}"
             )
             self._label(output, traffic_label, (10, 24), (55, 55, 55))
 
@@ -92,11 +113,34 @@ class DebugAnnotator:
                 )
             )
             overtake = status.overtake_state if status else "NONE"
-            right_gap = status.right_lane_available_seconds if status else 0.0
+            lifecycle = status.candidate_lifecycle_state.upper() if status else "IDLE"
             labels = [
-                f"#{vehicle.track_id} {vehicle.class_name} {lane.upper()} {duration:.1f}s",
-                f"OVERTAKE:{overtake} RIGHT GAP:{right_gap:.1f}s {decision}",
+                f"#{vehicle.track_id} {vehicle.class_name} {lane.upper()} {duration:.1f}s"
             ]
+            if self._config.show_advanced_debug:
+                measurement_parts = []
+                if self._config.show_coordinates:
+                    measurement_parts.append(
+                        status.coordinate_mode if status else "normalized_image"
+                    )
+                if self._config.show_speed:
+                    measurement_parts.append(
+                        f"{status.speed_kph:.0f} km/h approx"
+                        if status and status.speed_kph is not None
+                        else "SPEED:N/A"
+                    )
+                if self._config.show_gaps:
+                    gap_label = _gap_label(status.right_lane_gap if status else None)
+                    measurement_parts.append(f"RIGHT GAP:{gap_label}")
+                if measurement_parts:
+                    labels.append(" ".join(measurement_parts))
+                state_parts = [f"OVERTAKE:{overtake}"]
+                if self._config.show_lifecycle:
+                    state_parts.append(lifecycle)
+                state_parts.append(decision)
+                labels.append(" ".join(state_parts))
+            else:
+                labels.append(f"{lifecycle} {decision}")
             self._labels(output, labels, (x1, max(34, y1)), color)
 
             if status and status.related_track_ids:
@@ -150,3 +194,18 @@ class DebugAnnotator:
             thickness,
             cv2.LINE_AA,
         )
+
+
+def _quality(confidence: float) -> str:
+    if confidence >= 0.8:
+        return "HIGH"
+    if confidence >= 0.5:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _gap_label(gap: GapEstimate | None) -> str:
+    if gap is None:
+        return "CLEAR/UNKNOWN"
+    suffix = "m" if gap.unit == "meters" else " norm"
+    return f"{gap.value:.2f}{suffix}"

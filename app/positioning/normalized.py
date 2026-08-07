@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.config import RoadPositionConfig
-from app.models import LaneObservation, RoadPosition
+from app.models import CalibrationStatus, LaneObservation, RoadPosition
 
 
 class NormalizedImageRoadPositionEstimator:
@@ -16,8 +16,24 @@ class NormalizedImageRoadPositionEstimator:
     coordinate_system = "normalized_image"
     calibrated = False
 
-    def __init__(self, config: RoadPositionConfig) -> None:
+    def __init__(
+        self,
+        config: RoadPositionConfig,
+        calibration_status: CalibrationStatus | None = None,
+    ) -> None:
         self._config = config
+        self._calibration_status = calibration_status or CalibrationStatus(
+            mode="normalized",
+            valid=True,
+            reprojection_error_pixels=None,
+            confidence=0.65,
+            reason="physical calibration not configured",
+            world_units=None,
+        )
+
+    @property
+    def calibration_status(self) -> CalibrationStatus:
+        return self._calibration_status
 
     def estimate(
         self,
@@ -43,6 +59,10 @@ class NormalizedImageRoadPositionEstimator:
                 longitudinal=longitudinal,
                 coordinate_system="normalized_image",
                 calibrated=False,
+                image_position=(x, y),
+                normalized_position=(lateral, longitudinal),
+                world_position=None,
+                calibration_confidence=0.0,
             )
         return positions
 

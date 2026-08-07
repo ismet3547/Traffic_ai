@@ -9,6 +9,7 @@ from app.config import OutputConfig
 from app.events import writer as writer_module
 from app.events.writer import EventArtifactWriter
 from app.models import (
+    CandidateDecisionRecord,
     CandidateTransition,
     CongestionLevel,
     GlobalTrafficContext,
@@ -137,7 +138,9 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
     assert (event_directory / "representative.jpg").is_file()
     assert (event_directory / "event.mp4").is_file()
     assert metadata["event_type"] == "left_lane_review_candidate"
+    assert metadata["schema_version"] == "3.0"
     assert metadata["review_status"] == "pending_human_review"
+    assert metadata["candidate_lifecycle"]["state"] == "finalized"
     assert metadata["human_review_required"] is True
     assert metadata["enforcement_action"] == "none"
     assert metadata["duration_seconds"] == 3.0
@@ -153,3 +156,82 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
         "RIGHT_LANE_AVAILABLE",
     ]
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1
+
+
+def test_cancelled_event_is_preserved_but_not_pending_review(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(writer_module, "_cv2", lambda: _FakeCV2)
+    artifact_writer = EventArtifactWriter(
+        run_directory=tmp_path,
+        output_config=OutputConfig(
+            clip_pre_event_seconds=0.5,
+            clip_max_duration_seconds=2.0,
+        ),
+        video_info=VideoInfo(width=32, height=24, fps=2.0, frame_count=20),
+        source_video_name="source.mp4",
+    )
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    artifact_writer.process_frame(
+        frame,
+        [
+            CandidateTransition(
+                transition="started",
+                track_id=8,
+                lane_id="left",
+                start_timestamp_seconds=1.0,
+                timestamp_seconds=3.0,
+                duration_seconds=2.0,
+                confidence_score=0.8,
+                lifecycle_state="candidate_active",
+                candidate_started_at=3.0,
+            )
+        ],
+    )
+    artifact_writer.process_frame(
+        frame,
+        [
+            CandidateTransition(
+                transition="cancelled",
+                track_id=8,
+                lane_id="left",
+                start_timestamp_seconds=1.0,
+                timestamp_seconds=4.0,
+                duration_seconds=3.0,
+                confidence_score=0.8,
+                lifecycle_state="cancelled",
+                candidate_started_at=3.0,
+                cancelled_at=4.0,
+                cancellation_reason="OVERTAKING_CONFIRMED",
+                decision_history=(
+                    CandidateDecisionRecord(
+                        timestamp_seconds=3.0,
+                        decision="candidate_started",
+                        reason_codes=("LEFT_LANE_DURATION_EXCEEDED",),
+                    ),
+                    CandidateDecisionRecord(
+                        timestamp_seconds=4.0,
+                        decision="candidate_cancelled",
+                        reason_codes=("OVERTAKING_CONFIRMED",),
+                    ),
+                ),
+            )
+        ],
+    )
+
+    metadata_path = (
+        tmp_path / "events" / "left_lane_track_8_0000001000" / "metadata.json"
+    )
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata["review_status"] == "cancelled"
+    assert metadata["candidate_lifecycle"]["cancellation_reason"] == (
+        "OVERTAKING_CONFIRMED"
+    )
+    assert [item["decision"] for item in metadata["decision_history"]] == [
+        "candidate_started",
+        "candidate_cancelled",
+    ]
+    assert not (tmp_path / "events.jsonl").exists()
+    assert len((tmp_path / "cancelled_events.jsonl").read_text().splitlines()) == 1
+    assert artifact_writer.completed_count == 0
+    assert artifact_writer.cancelled_count == 1

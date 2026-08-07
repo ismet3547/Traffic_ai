@@ -1,0 +1,47 @@
+# EXAMPLE / PLACEHOLDER ONLY. These correspondences do not describe real footage.
+# Copy default.yaml and measure image/world points for the specific camera.
+video:
+  input_path: input/highway.mp4
+
+lanes:
+  coordinate_space: normalized
+  assignment_anchor: bottom_center
+  lanes:
+    - id: left
+      label: Left lane
+      leftmost: true
+      polygon: [[0.06, 1.0], [0.39, 1.0], [0.49, 0.43], [0.43, 0.43]]
+    - id: center
+      label: Center lane
+      polygon: [[0.39, 1.0], [0.69, 1.0], [0.55, 0.43], [0.49, 0.43]]
+    - id: right
+      label: Right lane
+      polygon: [[0.69, 1.0], [0.98, 1.0], [0.61, 0.43], [0.55, 0.43]]
+
+road_position:
+  mode: normalized_image
+  travel_direction: toward_top
+
+calibration:
+  mode: homography
+  world_units: meters
+  # PLACEHOLDER pixel points: near-left, near-right, far-right, far-left.
+  image_points: [[410, 720], [880, 720], [690, 420], [590, 420]]
+  # PLACEHOLDER measured road-plane coordinates corresponding one-for-one above.
+  world_points: [[0.0, 0.0], [12.0, 0.0], [12.0, 50.0], [0.0, 50.0]]
+  fallback_to_normalized: false
+  maximum_reprojection_error_pixels: 5.0
+  minimum_confidence_for_physical_measurements: 0.55
+  suppress_candidates_when_unreliable: true
+  world_longitudinal_axis: y
+  world_longitudinal_direction: positive
+
+right_lane_opportunity:
+  mode: auto
+  minimum_available_seconds: 3.0
+  front_gap_normalized: 0.08
+  rear_gap_normalized: 0.06
+  minimum_front_gap_m: 20.0
+  minimum_rear_gap_m: 15.0
+  minimum_confidence: 0.60
+  state_ttl_seconds: 2.0

@@ -10,6 +10,7 @@ from app.models import (
     LaneObservation,
     LaneTransition,
     RoadPosition,
+    SpeedEstimate,
     VehicleTrafficContext,
 )
 
@@ -29,6 +30,12 @@ class TrackMotionSample:
     estimated_lateral_movement: float
     neighboring_vehicle_track_ids: tuple[int, ...]
     lane_transition: LaneTransition | None = None
+    image_position: tuple[float, float] | None = None
+    normalized_position: tuple[float, float] | None = None
+    world_position: tuple[float, float] | None = None
+    coordinate_mode: str = "normalized_image"
+    calibration_confidence: float = 0.0
+    speed_estimate: SpeedEstimate | None = None
 
 
 class MotionHistoryStore:
@@ -46,6 +53,7 @@ class MotionHistoryStore:
         positions: dict[int, RoadPosition],
         vehicle_contexts: dict[int, VehicleTrafficContext],
         transitions: list[LaneTransition],
+        speed_estimates: dict[int, SpeedEstimate] | None = None,
     ) -> None:
         transition_by_track = {
             transition.track_id: transition for transition in transitions
@@ -89,6 +97,12 @@ class MotionHistoryStore:
                     estimated_lateral_movement=lateral_movement,
                     neighboring_vehicle_track_ids=neighbor_ids,
                     lane_transition=transition_by_track.get(track_id),
+                    image_position=position.image_position,
+                    normalized_position=position.normalized_position,
+                    world_position=position.world_position,
+                    coordinate_mode=position.coordinate_mode,
+                    calibration_confidence=position.calibration_confidence,
+                    speed_estimate=(speed_estimates or {}).get(track_id),
                 )
             )
 

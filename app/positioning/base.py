@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.models import LaneObservation, RoadPosition
+from app.models import CalibrationStatus, LaneObservation, RoadPosition
 
 
-class RoadPositionEstimator(Protocol):
+class RoadCoordinateTransformer(Protocol):
     @property
     def coordinate_system(self) -> str: ...
 
     @property
     def calibrated(self) -> bool: ...
+
+    @property
+    def calibration_status(self) -> CalibrationStatus: ...
 
     def estimate(
         self,
@@ -22,3 +25,7 @@ class RoadPositionEstimator(Protocol):
     ) -> dict[int, RoadPosition]:
         """Estimate comparable road positions for the current frame."""
         ...
+
+
+# Phase 2 compatibility name. New code should use RoadCoordinateTransformer.
+RoadPositionEstimator = RoadCoordinateTransformer

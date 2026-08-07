@@ -13,9 +13,16 @@ import numpy as np
 
 from app.config import OutputConfig
 from app.models import (
+    CalibrationStatusMetadata,
+    CameraMotionMetadata,
+    CandidateDecisionMetadata,
+    CandidateLifecycleMetadata,
     CandidateTransition,
     EventMetadata,
+    GapEstimate,
+    GapEstimateMetadata,
     OvertakingAssessmentMetadata,
+    SpeedEstimateMetadata,
     TrafficContextMetadata,
     VideoInfo,
 )
@@ -53,6 +60,7 @@ class EventArtifactWriter:
         self._events_directory = run_directory / "events"
         self._events_directory.mkdir(parents=True, exist_ok=True)
         self._index_path = run_directory / "events.jsonl"
+        self._cancelled_index_path = run_directory / "cancelled_events.jsonl"
         self._config = output_config
         self._video_info = video_info
         self._source_video_name = source_video_name
@@ -62,10 +70,15 @@ class EventArtifactWriter:
         self._prebuffer: deque[np.ndarray] = deque(maxlen=pre_event_frames)
         self._active: dict[int, _Recording] = {}
         self._completed_count = 0
+        self._cancelled_count = 0
 
     @property
     def completed_count(self) -> int:
         return self._completed_count
+
+    @property
+    def cancelled_count(self) -> int:
+        return self._cancelled_count
 
     def process_frame(
         self,
@@ -75,25 +88,31 @@ class EventArtifactWriter:
         for transition in transitions:
             if transition.transition == "started":
                 self._start(transition, frame)
+            elif transition.transition in {"suspended", "resumed"}:
+                self._update(transition)
 
         for recording in self._active.values():
             self._write_clip_frame(recording, frame)
 
         for transition in transitions:
-            if transition.transition == "ended":
-                self._finish(transition)
+            if transition.transition in {"ended", "finalized"}:
+                self._finish(transition, cancelled=False)
+            elif transition.transition == "cancelled":
+                self._finish(transition, cancelled=True)
 
         if self._prebuffer.maxlen:
             self._prebuffer.append(frame.copy())
 
     def finalize(self, transitions: list[CandidateTransition]) -> None:
         for transition in transitions:
-            if transition.transition == "ended":
-                self._finish(transition)
+            if transition.transition in {"ended", "finalized"}:
+                self._finish(transition, cancelled=False)
+            elif transition.transition == "cancelled":
+                self._finish(transition, cancelled=True)
         for track_id in list(self._active):
             recording = self._active[track_id]
             fallback = CandidateTransition(
-                transition="ended",
+                transition="cancelled",
                 track_id=track_id,
                 lane_id=recording.metadata.lane_id,
                 start_timestamp_seconds=recording.metadata.event_start_timestamp_seconds,
@@ -101,8 +120,11 @@ class EventArtifactWriter:
                 duration_seconds=recording.metadata.duration_seconds,
                 confidence_score=recording.metadata.confidence_score,
                 end_reason="pipeline_stopped",
+                lifecycle_state="cancelled",
+                cancelled_at=recording.metadata.candidate_created_timestamp_seconds,
+                cancellation_reason="pipeline_stopped",
             )
-            self._finish(fallback)
+            self._finish(fallback, cancelled=True)
 
     def _start(self, transition: CandidateTransition, frame: np.ndarray) -> None:
         if transition.track_id in self._active:
@@ -148,6 +170,25 @@ class EventArtifactWriter:
             policy_version=transition.policy_version,
             traffic_context=_traffic_context_metadata(transition),
             overtaking_assessment=_overtaking_metadata(transition),
+            candidate_lifecycle=_lifecycle_metadata(transition),
+            decision_history=_decision_history(transition),
+            calibration_status=_calibration_metadata(transition),
+            camera_motion=_camera_motion_metadata(transition),
+            speed_estimate=_speed_metadata(transition),
+            image_position=(
+                transition.position.image_position if transition.position else None
+            ),
+            normalized_position=(
+                transition.position.normalized_position if transition.position else None
+            ),
+            world_position=(
+                transition.position.world_position if transition.position else None
+            ),
+            coordinate_mode=(
+                transition.position.coordinate_mode
+                if transition.position
+                else "normalized_image"
+            ),
         )
         recording = _Recording(
             metadata=metadata, directory=event_directory, writer=writer
@@ -158,6 +199,18 @@ class EventArtifactWriter:
         self._write_metadata(recording)
         LOGGER.info("Review candidate started: %s", event_id)
 
+    def _update(self, transition: CandidateTransition) -> None:
+        recording = self._active.get(transition.track_id)
+        if recording is None:
+            return
+        _refresh_metadata(recording.metadata, transition)
+        self._write_metadata(recording)
+        LOGGER.info(
+            "Review candidate %s: %s",
+            transition.transition,
+            recording.metadata.event_id,
+        )
+
     def _write_clip_frame(self, recording: _Recording, frame: np.ndarray) -> None:
         max_frames = max(
             1, round(self._config.clip_max_duration_seconds * self._video_info.fps)
@@ -167,24 +220,25 @@ class EventArtifactWriter:
         recording.writer.write(frame)
         recording.written_frames += 1
 
-    def _finish(self, transition: CandidateTransition) -> None:
+    def _finish(self, transition: CandidateTransition, cancelled: bool) -> None:
         recording = self._active.pop(transition.track_id, None)
         if recording is None:
             return
         recording.writer.release()
-        recording.metadata.event_end_timestamp_seconds = transition.timestamp_seconds
-        recording.metadata.duration_seconds = transition.duration_seconds
-        recording.metadata.confidence_score = transition.confidence_score
-        recording.metadata.end_reason = transition.end_reason
-        if transition.traffic_context is not None:
-            recording.metadata.traffic_context = _traffic_context_metadata(transition)
-        if transition.overtaking_assessment is not None:
-            recording.metadata.overtaking_assessment = _overtaking_metadata(transition)
+        _refresh_metadata(recording.metadata, transition)
+        recording.metadata.review_status = (
+            "cancelled" if cancelled else "pending_human_review"
+        )
         self._write_metadata(recording)
-        with self._index_path.open("a", encoding="utf-8") as index:
+        index_path = self._cancelled_index_path if cancelled else self._index_path
+        with index_path.open("a", encoding="utf-8") as index:
             index.write(recording.metadata.model_dump_json() + "\n")
-        self._completed_count += 1
-        LOGGER.info("Review candidate finalized: %s", recording.metadata.event_id)
+        if cancelled:
+            self._cancelled_count += 1
+            LOGGER.info("Review candidate cancelled: %s", recording.metadata.event_id)
+        else:
+            self._completed_count += 1
+            LOGGER.info("Review candidate finalized: %s", recording.metadata.event_id)
 
     @staticmethod
     def _write_metadata(recording: _Recording) -> None:
@@ -223,6 +277,15 @@ def _traffic_context_metadata(
         coordinate_system=traffic.coordinate_system,
         calibrated=(traffic.coordinate_system == "calibrated_world"),
         confidence=traffic.confidence,
+        right_lane_opportunity_mode=(
+            vehicle.right_lane_opportunity_mode if vehicle else "unavailable"
+        ),
+        right_lane_front_gap=_gap_metadata(
+            vehicle.right_lane_front_gap if vehicle else None
+        ),
+        right_lane_rear_gap=_gap_metadata(
+            vehicle.right_lane_rear_gap if vehicle else None
+        ),
     )
 
 
@@ -240,4 +303,117 @@ def _overtaking_metadata(
         related_track_ids=list(assessment.related_track_ids),
         started_at=assessment.started_at,
         completed_at=assessment.completed_at,
+    )
+
+
+def _refresh_metadata(metadata: EventMetadata, transition: CandidateTransition) -> None:
+    if transition.transition in {"ended", "finalized", "cancelled"}:
+        metadata.event_end_timestamp_seconds = transition.timestamp_seconds
+    metadata.duration_seconds = transition.duration_seconds
+    metadata.confidence_score = transition.confidence_score
+    metadata.end_reason = transition.end_reason
+    metadata.candidate_lifecycle = _lifecycle_metadata(transition)
+    metadata.decision_history = _decision_history(transition)
+    if transition.traffic_context is not None:
+        metadata.traffic_context = _traffic_context_metadata(transition)
+    if transition.overtaking_assessment is not None:
+        metadata.overtaking_assessment = _overtaking_metadata(transition)
+    if transition.position is not None:
+        metadata.image_position = transition.position.image_position
+        metadata.normalized_position = transition.position.normalized_position
+        metadata.world_position = transition.position.world_position
+        metadata.coordinate_mode = transition.position.coordinate_mode
+    metadata.calibration_status = _calibration_metadata(transition)
+    metadata.camera_motion = _camera_motion_metadata(transition)
+    metadata.speed_estimate = _speed_metadata(transition)
+
+
+def _gap_metadata(gap: GapEstimate | None) -> GapEstimateMetadata | None:
+    if gap is None:
+        return None
+    return GapEstimateMetadata(
+        value=gap.value,
+        unit=gap.unit,
+        confidence=gap.confidence,
+        coordinate_mode=gap.coordinate_mode,
+    )
+
+
+def _lifecycle_metadata(
+    transition: CandidateTransition,
+) -> CandidateLifecycleMetadata:
+    legacy_finalized = transition.transition == "ended"
+    return CandidateLifecycleMetadata(
+        state="finalized" if legacy_finalized else transition.lifecycle_state,
+        candidate_started_at=transition.candidate_started_at,
+        suspended_at=transition.suspended_at,
+        finalized_at=(
+            transition.timestamp_seconds
+            if legacy_finalized
+            else transition.finalized_at
+        ),
+        cancelled_at=transition.cancelled_at,
+        cancellation_reason=transition.cancellation_reason,
+    )
+
+
+def _decision_history(
+    transition: CandidateTransition,
+) -> list[CandidateDecisionMetadata]:
+    return [
+        CandidateDecisionMetadata(
+            timestamp_seconds=item.timestamp_seconds,
+            decision=item.decision,
+            reason_codes=list(item.reason_codes),
+        )
+        for item in transition.decision_history
+    ]
+
+
+def _calibration_metadata(
+    transition: CandidateTransition,
+) -> CalibrationStatusMetadata | None:
+    status = transition.calibration_status
+    if status is None:
+        return None
+    return CalibrationStatusMetadata(
+        mode=status.mode,
+        valid=status.valid,
+        reprojection_error_pixels=status.reprojection_error_pixels,
+        confidence=status.confidence,
+        reason=status.reason,
+        world_units=status.world_units,
+    )
+
+
+def _camera_motion_metadata(
+    transition: CandidateTransition,
+) -> CameraMotionMetadata | None:
+    motion = transition.camera_motion
+    if motion is None:
+        return None
+    return CameraMotionMetadata(
+        dx=motion.dx,
+        dy=motion.dy,
+        rotation_degrees=motion.rotation_degrees,
+        confidence=motion.confidence,
+        valid=motion.valid,
+        level=motion.level,
+        method=motion.method,
+    )
+
+
+def _speed_metadata(
+    transition: CandidateTransition,
+) -> SpeedEstimateMetadata | None:
+    speed = transition.speed_estimate
+    if speed is None:
+        return None
+    return SpeedEstimateMetadata(
+        speed_mps=speed.speed_mps,
+        speed_kph=speed.speed_kph,
+        speed_confidence=speed.speed_confidence,
+        speed_mode=speed.speed_mode,
+        normalized_motion_rate=speed.normalized_motion_rate,
+        sample_count=speed.sample_count,
     )

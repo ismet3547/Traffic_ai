@@ -1,186 +1,195 @@
-# Traffic AI: contextual left-lane review MVP
+# Traffic AI: explainable left-lane review MVP
 
-Traffic AI analyzes prerecorded highway video and creates explainable **human-review candidates** for prolonged left-lane use. Phase 2 adds motion history, stable lane changes, surrounding-traffic context, overtaking assessment, congestion suppression, and realistic right-lane opportunities.
+Traffic AI analyzes prerecorded highway video and creates evidence packages for a human operator to review. Phase 3 adds an explicit candidate lifecycle, optional road-plane homography, unit-safe gaps, approximate calibrated speed, confidence-aware degradation, and a camera-motion extension point.
 
-This is decision-support software. It does not determine a legal violation, identify a person, read license plates, issue tickets, or contact police systems. Every event remains `pending_human_review` with `enforcement_action: none`.
+This is decision-support software—not an enforcement system. It does not identify people, read license plates, determine a legal violation, issue fines, or contact police systems. Finalized events always retain `human_review_required: true` and `enforcement_action: none`.
 
-## Architecture
+## Architecture and data flow
 
 ```mermaid
 flowchart LR
-    V[FrameSource] --> D[YOLO Detector]
-    D --> T[ByteTrack Tracker]
-    T --> L[Lane Assigner]
-    L --> H[Lane-change Hysteresis]
-    H --> P[Road Position Estimator]
-    P --> C[Traffic Context]
-    C --> M[Bounded Motion History]
-    M --> O[Overtaking State Machine]
+    V[FrameSource: MP4 / future RTSP] --> D[YOLO Detector]
+    D --> T[ByteTrack]
+    T --> CM[Camera Motion Diagnostic]
+    T --> L[Lane Assignment + Hysteresis]
+    CM --> P[Road Coordinate Transformer]
+    L --> P
+    P --> S[Rolling Speed Estimator]
+    P --> C[Traffic Context + Unit-safe Gaps]
+    S --> C
+    C --> H[Bounded Motion History]
+    H --> O[Overtaking State Machine]
     O --> R[Left-lane Decision Policy]
-    R --> E[Review Evidence Writer]
-    R --> A[Debug Annotator]
+    R --> CL[Candidate Lifecycle]
+    CL --> E[Evidence Writer]
+    CL --> A[Debug Annotator]
 ```
+
+Detection, tracking, camera motion, geometry, speed, context, overtaking, rules, lifecycle, rendering, and persistence are separate modules. None of the domain policies import YOLO or ByteTrack. A future RTSP/drone source can implement `FrameSource`; a future stabilizer can be inserted before coordinate transformation without moving homography or speed logic into the rule engine.
 
 ```text
 traffic_ai/
   app/
-    main.py                       CLI and dependency composition
-    config.py                     validated YAML configuration
-    pipeline.py                   source-independent frame pipeline
-    detection/                    detector protocol + Ultralytics adapter
-    tracking/                     tracker protocol + ByteTrack adapter
-    lanes/                        polygon lane assignment
-    motion/                       bounded histories + lane hysteresis
-    positioning/                  replaceable road-position estimation
-    context/                      neighbors, congestion, right opportunities
-    overtaking/                   policy protocol + overtaking state machine
-    rules/                        occupancy lifecycle + decision policy
-    events/                       review images, clips, and JSON evidence
-    video/                        source/sink protocols + OpenCV adapters
-    models/                       shared typed domain records
-  configs/default.yaml
-  input/
-  output/
-  tests/
-  requirements.txt
+    main.py                 CLI and dependency composition
+    pipeline.py             source-independent analysis loop
+    config.py               strict Pydantic configuration
+    detection/              detector protocol + Ultralytics adapter
+    tracking/               tracker protocol + ByteTrack adapter
+    camera_motion/          fixed-camera + experimental feature diagnostic
+    lanes/                  polygons, assignment, adjacent-lane ordering
+    positioning/            normalized and homography transformers
+    speed/                  robust rolling physical-speed estimator
+    motion/                 bounded histories + lane-change hysteresis
+    context/                congestion, neighbors, unit-safe gaps
+    overtaking/             contextual state machine
+    rules/                  left-lane policy and orchestration
+    candidates/             explicit evidence lifecycle
+    events/                 images, clips, JSON metadata and indexes
+    video/                  OpenCV source/sink and debug annotation
+    tools/                  calibration visualization utility
+    models/                 framework-neutral typed records
+  configs/
+    default.yaml            safe uncalibrated configuration
+    calibrated_example.yaml PLACEHOLDER calibration example
+  tests/                    synthetic/model-independent tests
 ```
 
-Detection and tracking remain independent from traffic policy. `LeftLaneRuleEngine` receives only typed lane, history, context, and overtaking results; it never imports YOLO or ByteTrack. Future RTSP or drone sources can implement `FrameSource`, and a calibrated homography can replace `RoadPositionEstimator` without rewriting the rules.
+## Candidate lifecycle
 
-## Phase 2 algorithm
-
-For each frame the application:
-
-1. Detects vehicles and assigns persistent track IDs.
-2. Assigns each bottom-center road-contact point to a lane polygon.
-3. Applies time-and-frame hysteresis before accepting a lane change, preventing boundary jitter from producing repeated transitions.
-4. Maps the road-contact point to normalized road coordinates and estimates per-track longitudinal/lateral motion.
-5. Finds the nearest vehicles ahead and behind in the same lane and adjacent right lane.
-6. Stores those observations in a rolling history bounded by both seconds and sample count.
-7. Estimates traffic density and normalized motion to label traffic `free_flow`, `moderate`, `dense`, `stop_and_go`, or `unknown`.
-8. Tracks whether adequate front and rear space in the adjacent-right lane remains available for long enough.
-9. Advances a per-track overtaking state machine.
-10. Applies the contextual left-lane decision policy and emits only sufficiently supported review candidates.
-
-The overtaking states are:
+Candidate start and continuation are separate decisions:
 
 ```text
-NONE -> ENTERED_LEFT -> PASSING -> PASSED_TARGET
-                                      |
-                                      +-> RETURNING_RIGHT -> COMPLETED
-
-Any incomplete/stale path may become ABORTED.
+IDLE → ACCUMULATING → CANDIDATE_ACTIVE ↔ SUSPENDED
+                                      ↘ CANCELLED
+                                      ↘ FINALIZED
 ```
 
-Strong overtaking evidence requires a confirmed move into the left lane near a vehicle ahead, followed by a reversal in their longitudinal ordering. Returning right adds completion evidence. Short related-track interruptions are tolerated; stale attempts expire.
+- `ACCUMULATING`: left-lane evidence exists but the policy threshold/context gate has not passed.
+- `CANDIDATE_ACTIVE`: start conditions passed; an evidence package is recording.
+- `SUSPENDED`: later context temporarily invalidated the evidence, such as a blocked right lane.
+- `CANCELLED`: invalidity persisted beyond its configured grace period. Evidence remains on disk but is not submitted as pending review.
+- `FINALIZED`: evidence is complete and immutable; it is submitted for mandatory human review.
 
-After a pass is confirmed, the suspicious-occupancy clock restarts at pass completion. If the driver remains left after the configured grace period while the right lane is available, a new candidate may eventually be created. One legitimate overtake never grants permanent immunity.
-
-## Candidate and suppression policy
-
-Duration alone is no longer enough in the application pipeline. A candidate requires:
-
-- the left-lane occupancy threshold to be exceeded;
-- enough per-track history;
-- free-flow traffic with adequate context confidence;
-- no active or confirmed overtake;
-- a safe-looking adjacent-right gap persisting for the configured duration;
-- sufficient combined detector, traffic, right-gap, and overtaking evidence confidence.
-
-The classifier exposes:
-
-- `overtaking`
-- `likely_overtaking`
-- `congestion`
-- `temporary_left_lane_use`
-- `possible_left_lane_occupation`
-- `insufficient_evidence`
-
-Candidate reason codes are:
-
-- `LEFT_LANE_DURATION_EXCEEDED`
-- `NO_ACTIVE_OVERTAKE`
-- `RIGHT_LANE_AVAILABLE`
-- `FREE_FLOW_TRAFFIC`
-
-Suppression reasons shown in rule status/debug video include:
-
-- `DURATION_BELOW_THRESHOLD`
-- `OVERTAKING_CONFIRMED`
-- `ACTIVE_OVERTAKE`
-- `CONGESTION`
-- `RIGHT_LANE_UNAVAILABLE`
-- `INSUFFICIENT_CONTEXT`
-- `LOW_EVIDENCE_CONFIDENCE`
-
-Uncertain context is intentionally classified as `insufficient_evidence` rather than promoted to a candidate.
-
-## Coordinate and distance limitations
-
-The initial `NormalizedImageRoadPositionEstimator` produces dimensionless values in the range 0-1. Longitudinal values increase in the configured direction of travel. Gap settings such as `0.08` are normalized image-space estimates, **not meters**.
-
-Perspective distortion means equal normalized gaps at the near and far ends of an image do not represent equal physical distances. Do not interpret current motion as speed or gaps as real-world following distance. A future calibrated homography/world-coordinate estimator can implement the existing interface and label its output `calibrated_world`.
-
-## Configuration
-
-Edit [configs/default.yaml](configs/default.yaml) for every camera. The included polygons are illustrative. Lane entries must be ordered from left to right in the observed direction of travel, because that order defines the adjacent-right lane.
-
-Key Phase 2 settings:
+`CONGESTION`, `ACTIVE_OVERTAKE`, `OVERTAKING_CONFIRMED`, unreliable calibration, unstable tracking, and high camera motion use the invalidation grace. Other temporary context failures use the suspension grace. A valid context can resume within grace. Finalized events cannot later become cancelled. A cancelled episode can restart only after cooldown and a fresh eligible decision, so a completed overtake does not permanently exempt later suspicious occupancy.
 
 ```yaml
-road_position:
-  mode: normalized_image
-  travel_direction: toward_top
-
-traffic_context:
-  history_seconds: 12.0
-  minimum_history_seconds: 2.0
-  maximum_samples_per_track: 900
-
-lane_change:
-  confirmation_seconds: 0.4
-  minimum_frames: 3
-
-overtaking:
-  enabled: true
-  observation_window_seconds: 10.0
-  completion_timeout_seconds: 15.0
-  minimum_confidence: 0.65
-  entry_target_max_gap_normalized: 0.20
-  pass_order_margin_normalized: 0.01
-  post_overtake_grace_seconds: 2.0
-
-congestion:
-  dense_vehicle_count_per_lane: 3
-  dense_density_ratio: 0.80
-  stop_and_go_max_motion_per_second_normalized: 0.015
-
-right_lane_opportunity:
-  minimum_available_seconds: 3.0
-  front_gap_normalized: 0.08
-  rear_gap_normalized: 0.06
-
-rules:
-  left_lane:
-    occupancy_threshold_seconds: 8.0
-    minimum_evidence_confidence: 0.65
-    overtaking_clearance_mode: contextual
-    policy_version: "2.0"
+candidate_lifecycle:
+  invalidation_grace_seconds: 2.0
+  suspension_grace_seconds: 3.0
+  finalize_after_seconds: 5.0
+  restart_cooldown_seconds: 1.5
+  maximum_decision_history_entries: 32
 ```
 
-All thresholds are validated by Pydantic. Older configurations without Phase 2 sections continue with defaults. The legacy value `overtaking_clearance_mode: none` is accepted, but contextual application decisions then treat overtaking as unassessed and suppress candidates as insufficient evidence.
+Decision history records only meaningful state changes, not every frame, and is bounded.
 
-## Setup
+## Calibration and coordinate modes
 
-Python 3.11 or newer is required. From the repository root:
+The default is safe uncalibrated operation:
 
-PowerShell:
+```yaml
+calibration:
+  mode: normalized
+  fallback_to_normalized: true
+```
+
+`NormalizedImageRoadPositionEstimator` retains pixel contact points plus dimensionless normalized coordinates. It can order vehicles and calculate normalized motion/gaps, but it never emits meters or km/h.
+
+For a fixed camera, configure corresponding image pixels and measured points on the road plane:
+
+```yaml
+calibration:
+  mode: homography
+  world_units: meters
+  image_points:
+    - [410, 720]
+    - [880, 720]
+    - [690, 420]
+    - [590, 420]
+  world_points:
+    - [0.0, 0.0]
+    - [12.0, 0.0]
+    - [12.0, 50.0]
+    - [0.0, 50.0]
+  fallback_to_normalized: false
+  maximum_reprojection_error_pixels: 5.0
+  minimum_confidence_for_physical_measurements: 0.55
+```
+
+The values in [configs/calibrated_example.yaml](configs/calibrated_example.yaml) are explicitly placeholders. Measure at least four non-collinear, one-to-one correspondences for the actual camera. Good choices are surveyed lane-marker corners or other stationary road points whose planar distances are known. Spread points across the analysis region; clustered points extrapolate poorly.
+
+Startup validates counts, uniqueness, non-collinearity, matrix solvability, finite projection, supported units, and inverse pixel reprojection error. The matrix is computed once. A structurally invalid config is rejected. A runtime homography failure only activates normalized mode when `fallback_to_normalized: true`, and metadata reports `homography_fallback`; fake physical values are never produced.
+
+Every track preserves:
+
+- `image_position`: bottom-center contact point in pixels;
+- `normalized_position`: dimensionless image-space position;
+- `world_position`: projected road-plane point, or `null` without a homography;
+- effective `coordinate_mode` and calibration confidence.
+
+A homography assumes the relevant vehicle contact points lie approximately on the calibrated road plane. Bridges, slopes, raised objects, and inaccurate contact points violate that assumption. Large drone altitude, pitch, roll, yaw, or translation changes alter the image-to-road mapping and invalidate a static homography; recalibration or dynamic stabilization/pose estimation is required.
+
+## Speed, gaps, and right-lane opportunity
+
+Approximate physical speed uses a robust rolling road-plane displacement estimator. It requires calibrated meter coordinates, enough samples/time, and acceptable camera/tracker quality. Teleport-like jumps, long tracker gaps, excessive camera movement, and implausible highway speeds are rejected or reset. `speed_kph` is always `null` in normalized mode; `normalized_motion_rate` may still be available and is labeled separately.
+
+```yaml
+speed_estimation:
+  enabled: true
+  minimum_window_seconds: 0.8
+  maximum_window_seconds: 2.5
+  minimum_samples: 5
+  smoothing: median
+  max_reasonable_speed_kph: 220
+  max_position_jump_meters: 20
+  tracker_gap_grace_seconds: 0.5
+```
+
+Speed is approximate—not speed-enforcement evidence. Error depends on surveyed points, lens distortion, tracking stability, contact-point accuracy, frame timestamps, and how well the road matches a plane.
+
+Gap metadata is a typed value with `value`, `unit`, `confidence`, and `coordinate_mode`. Meter and normalized thresholds cannot be confused:
+
+```yaml
+right_lane_opportunity:
+  mode: auto
+  minimum_front_gap_m: 20.0
+  minimum_rear_gap_m: 15.0
+  front_gap_normalized: 0.08
+  rear_gap_normalized: 0.06
+  minimum_available_seconds: 3.0
+```
+
+`auto` uses meters only when calibrated positions are trustworthy, otherwise normalized thresholds. `calibrated` marks opportunity unavailable on uncalibrated input; it never treats a normalized value as meters. Calibrated ordering, gaps, and relative speed strengthen overtaking evidence such as `TARGET_GAINING_ON_VEHICLE`, `RELATIVE_ORDER_CHANGED`, `TARGET_PASSED_VEHICLE`, and `RETURNED_RIGHT`. Speed is helpful but never mandatory.
+
+## Camera motion and drones
+
+`camera_motion.mode: none` is the fixed-camera default. The optional `feature_based` implementation uses background features, Lucas–Kanade optical flow, vehicle-box masks, and a robust partial-affine estimate. It reports translation, rotation, confidence, and motion level for diagnostics and decision degradation; it does not warp/stabilize frames and is not production-grade drone stabilization.
+
+Detection currently runs on raw frames, then tracked vehicle boxes are excluded from the diagnostic motion estimate before coordinate transformation. This ordering lets the experimental estimator avoid moving objects. A future full stabilizer should expose both a stabilized frame and transform and run before detection/road positioning, with lane geometry and homography updated consistently.
+
+## Calibration preview
+
+Save an annotated frame with calibration points, projected world grid, lane polygons, and quality status:
+
+```powershell
+python -m app.tools.visualize_calibration `
+  --video input/highway.mp4 `
+  --config configs/calibrated_example.yaml `
+  --output output/calibration_preview.jpg
+```
+
+Add `--frame-index 100` to inspect another frame or `--show` for an optional OpenCV window. Saving works without a GUI.
+
+## Setup and run
+
+Python 3.11 or newer is required. From the repository root on PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m app.main --config configs/default.yaml --input input/highway.mp4
 ```
 
 macOS/Linux:
@@ -190,19 +199,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
-
-The first use of a model name such as `yolo11n.pt` may download model weights. Supply a local model with `--model` when required.
-
-## Run
-
-Calibrate `configs/default.yaml`, then analyze an MP4:
-
-```powershell
 python -m app.main --config configs/default.yaml --input input/highway.mp4
 ```
 
-Common overrides:
+Optional CLI overrides:
 
 ```powershell
 python -m app.main `
@@ -213,14 +213,15 @@ python -m app.main `
   --device cpu
 ```
 
-For a CUDA device supported by the installed PyTorch build, use `--device 0`.
+The first model-name use may download YOLO weights. Lane polygons in the default config are illustrative and must be adjusted for the camera.
 
-## Output and evidence
+## Output and metadata
 
 ```text
 output/highway_YYYYMMDD_HHMMSS/
   annotated.mp4
-  events.jsonl
+  events.jsonl                 finalized, pending-human-review records only
+  cancelled_events.jsonl       invalidated evidence, never pending review
   events/
     left_lane_track_17_0000012500/
       metadata.json
@@ -228,66 +229,30 @@ output/highway_YYYYMMDD_HHMMSS/
       event.mp4
 ```
 
-The debug video shows vehicle ID, stable lane, left-lane duration, overtake state, right-gap duration, candidate/suppression state, overall traffic state, and a subtle line to a related overtaken track when visible.
+Phase 3 metadata includes lifecycle timestamps/cancellation reason, bounded decision history, all coordinate representations, calibration quality, camera motion, approximate speed mode/confidence, gap units/mode, congestion, overtaking state/evidence, and policy reason codes. Cancelled records use `review_status: cancelled`; finalized records use `review_status: pending_human_review`.
 
-Phase 2 keeps all Phase 1 metadata fields and adds:
+The debug video can show track ID, lane, coordinate mode, approximate calibrated speed or `N/A`, left-lane duration, overtake state, right-lane gap with unit, lifecycle, suppression/candidate status, traffic state, calibration quality, and camera-motion level. Advanced fields can be disabled in `output` config.
 
-```json
-{
-  "event_type": "left_lane_review_candidate",
-  "review_status": "pending_human_review",
-  "human_review_required": true,
-  "enforcement_action": "none",
-  "policy_version": "2.0",
-  "behavior_classification": "possible_left_lane_occupation",
-  "evidence_confidence_score": 0.79,
-  "traffic_context": {
-    "congestion_level": "free_flow",
-    "traffic_density": 0.31,
-    "nearby_vehicle_count": 3,
-    "right_lane_available": true,
-    "right_lane_available_seconds": 4.7,
-    "coordinate_system": "normalized_image",
-    "calibrated": false,
-    "confidence": 0.82
-  },
-  "overtaking_assessment": {
-    "status": "not_overtaking",
-    "state": "NONE",
-    "confidence": 0.78,
-    "evidence": ["no_active_overtaking_sequence_detected"],
-    "related_track_ids": []
-  },
-  "review_reason_codes": [
-    "LEFT_LANE_DURATION_EXCEEDED",
-    "NO_ACTIVE_OVERTAKE",
-    "RIGHT_LANE_AVAILABLE",
-    "FREE_FLOW_TRAFFIC"
-  ]
-}
-```
+## Tests and checks
 
-The metadata contains track-level technical evidence only and no personal identity data.
-
-## Test and lint
-
-The test suite is model-independent and does not download YOLO weights:
+Tests use synthetic geometry and fake video writers; they do not load YOLO weights:
 
 ```powershell
 python -m pytest -q
 python -m ruff check app tests
 python -m ruff format --check app tests
+python -m compileall -q app tests
 ```
 
-It covers lane hysteresis, boundary jitter, overtaking suppression, free-right-lane candidates, dense traffic, blocked right lanes, temporary tracker loss, return-right completion, post-overtake renewed occupancy, and metadata serialization.
+Coverage includes Phase 2 behavior plus known-point homography mapping, invalid calibration, normalized fallback, coordinate preservation, meter/normalized gap separation, constant physical motion, jump rejection, tracker dropout, uncalibrated speed gating, lifecycle start/suspend/resume/cancel/finalize/restart, low-quality degradation, and cancelled-event persistence.
 
-## Remaining limitations
+## Performance and known limitations
 
-- Static lane polygons assume a fixed camera; moving drone footage needs stabilization.
-- Normalized image positions are perspective-distorted and cannot provide meters or physical speed.
-- Tracker ID switches or long occlusion can break an overtaking relationship.
-- Congestion and gap thresholds require site-specific validation.
-- Only the immediately adjacent-right lane is evaluated.
-- The logic does not understand road signs, temporary closures, emergency maneuvers, weather, or jurisdiction-specific exceptions.
-- Detection absence is not proof that a lane is empty; human reviewers must inspect the saved evidence.
-- No automatic enforcement, identity recognition, or legal determination is implemented.
+- Homography and calibration validation run once at startup; track/speed/history buffers are bounded. The debug frame copy and experimental optical flow are the main optional per-frame costs.
+- Static lane polygons and a static homography primarily target fixed cameras. The feature diagnostic does not make moving-drone measurements reliable.
+- Four exact correspondences can have low residual error yet still describe a poorly surveyed region; inspect the projected grid and validate against known distances.
+- Tracker ID switches and long occlusions can still break speed/overtaking relationships.
+- Detection absence is not proof a lane is empty. Congestion, gap, and policy thresholds require site-specific validation.
+- Lens distortion is not currently modeled; undistort footage before calibration when distortion is material.
+- The system does not interpret signs, closures, roadworks, emergency maneuvers, weather, or jurisdiction-specific exceptions.
+- All outputs are review candidates. Human judgment remains mandatory and no automatic enforcement is implemented.

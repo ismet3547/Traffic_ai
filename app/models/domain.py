@@ -97,6 +97,26 @@ class SuppressionReason(str, Enum):
     RIGHT_LANE_UNAVAILABLE = "RIGHT_LANE_UNAVAILABLE"
     INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT"
     LOW_EVIDENCE_CONFIDENCE = "LOW_EVIDENCE_CONFIDENCE"
+    CALIBRATION_UNRELIABLE = "CALIBRATION_UNRELIABLE"
+    LOW_POSITION_CONFIDENCE = "LOW_POSITION_CONFIDENCE"
+    UNSTABLE_TRACK = "UNSTABLE_TRACK"
+    CAMERA_MOTION_HIGH = "CAMERA_MOTION_HIGH"
+
+
+class CandidateLifecycleState(str, Enum):
+    IDLE = "idle"
+    ACCUMULATING = "accumulating"
+    CANDIDATE_ACTIVE = "candidate_active"
+    SUSPENDED = "suspended"
+    CANCELLED = "cancelled"
+    FINALIZED = "finalized"
+
+
+class EvidenceQuality(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,12 +134,63 @@ class RoadPosition:
     longitudinal: float
     coordinate_system: Literal["normalized_image", "calibrated_world"]
     calibrated: bool
+    image_position: tuple[float, float] | None = None
+    normalized_position: tuple[float, float] | None = None
+    world_position: tuple[float, float] | None = None
+    calibration_confidence: float = 0.0
+
+    @property
+    def coordinate_mode(self) -> str:
+        return self.coordinate_system
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationStatus:
+    mode: str
+    valid: bool
+    reprojection_error_pixels: float | None
+    confidence: float
+    reason: str | None = None
+    world_units: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CameraMotionEstimate:
+    dx: float
+    dy: float
+    rotation_degrees: float
+    confidence: float
+    valid: bool
+    level: str = "unknown"
+    method: str = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class SpeedEstimate:
+    track_id: int
+    speed_mps: float | None
+    speed_kph: float | None
+    speed_confidence: float
+    speed_mode: str
+    normalized_motion_rate: float | None = None
+    sample_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class NeighborReference:
     track_id: int
     longitudinal_gap: float
+    gap_unit: Literal["meters", "normalized"] = "normalized"
+    confidence: float = 0.0
+    coordinate_mode: str = "normalized_image"
+
+
+@dataclass(frozen=True, slots=True)
+class GapEstimate:
+    value: float
+    unit: Literal["meters", "normalized"]
+    confidence: float
+    coordinate_mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +223,8 @@ class GlobalTrafficContext:
     average_normalized_motion_per_second: float | None
     confidence: float
     coordinate_system: str = "normalized_image"
+    calibration_status: CalibrationStatus | None = None
+    camera_motion: CameraMotionEstimate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +236,9 @@ class VehicleTrafficContext:
     right_lane_available: bool | None
     right_lane_available_seconds: float
     right_lane_confidence: float
+    right_lane_front_gap: GapEstimate | None = None
+    right_lane_rear_gap: GapEstimate | None = None
+    right_lane_opportunity_mode: str = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +246,7 @@ class TrafficFrameContext:
     global_context: GlobalTrafficContext
     vehicles: dict[int, VehicleTrafficContext]
     positions: dict[int, RoadPosition]
+    speeds: dict[int, SpeedEstimate] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,11 +283,25 @@ class VehicleRuleStatus:
     right_lane_available_seconds: float = 0.0
     evidence_confidence: float = 0.0
     related_track_ids: tuple[int, ...] = ()
+    candidate_lifecycle_state: str = CandidateLifecycleState.IDLE.value
+    speed_kph: float | None = None
+    speed_mode: str = "unavailable_uncalibrated"
+    coordinate_mode: str = "normalized_image"
+    right_lane_gap: GapEstimate | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDecisionRecord:
+    timestamp_seconds: float
+    decision: str
+    reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class CandidateTransition:
-    transition: Literal["started", "ended"]
+    transition: Literal[
+        "started", "suspended", "resumed", "cancelled", "finalized", "ended"
+    ]
     track_id: int
     lane_id: str
     start_timestamp_seconds: float
@@ -225,6 +316,17 @@ class CandidateTransition:
     overtaking_assessment: OvertakingAssessment | None = None
     behavior_classification: str | None = None
     evidence_confidence_score: float | None = None
+    lifecycle_state: str = CandidateLifecycleState.CANDIDATE_ACTIVE.value
+    candidate_started_at: float | None = None
+    suspended_at: float | None = None
+    finalized_at: float | None = None
+    cancelled_at: float | None = None
+    cancellation_reason: str | None = None
+    decision_history: tuple[CandidateDecisionRecord, ...] = ()
+    position: RoadPosition | None = None
+    speed_estimate: SpeedEstimate | None = None
+    calibration_status: CalibrationStatus | None = None
+    camera_motion: CameraMotionEstimate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +370,71 @@ class TrafficContextMetadata(BaseModel):
     coordinate_system: str = "normalized_image"
     calibrated: bool = False
     confidence: float = Field(default=0, ge=0, le=1)
+    right_lane_opportunity_mode: str = "unavailable"
+    right_lane_front_gap: GapEstimateMetadata | None = None
+    right_lane_rear_gap: GapEstimateMetadata | None = None
+
+
+class GapEstimateMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: float = Field(ge=0)
+    unit: Literal["meters", "normalized"]
+    confidence: float = Field(ge=0, le=1)
+    coordinate_mode: str
+
+
+class CalibrationStatusMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    valid: bool
+    reprojection_error_pixels: float | None = Field(default=None, ge=0)
+    confidence: float = Field(ge=0, le=1)
+    reason: str | None = None
+    world_units: str | None = None
+
+
+class CameraMotionMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dx: float
+    dy: float
+    rotation_degrees: float
+    confidence: float = Field(ge=0, le=1)
+    valid: bool
+    level: str
+    method: str
+
+
+class SpeedEstimateMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speed_mps: float | None = Field(default=None, ge=0)
+    speed_kph: float | None = Field(default=None, ge=0)
+    speed_confidence: float = Field(ge=0, le=1)
+    speed_mode: str
+    normalized_motion_rate: float | None = Field(default=None, ge=0)
+    sample_count: int = Field(default=0, ge=0)
+
+
+class CandidateDecisionMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp_seconds: float = Field(ge=0)
+    decision: str
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class CandidateLifecycleMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: str
+    candidate_started_at: float | None = Field(default=None, ge=0)
+    suspended_at: float | None = Field(default=None, ge=0)
+    finalized_at: float | None = Field(default=None, ge=0)
+    cancelled_at: float | None = Field(default=None, ge=0)
+    cancellation_reason: str | None = None
 
 
 class OvertakingAssessmentMetadata(BaseModel):
@@ -287,10 +454,12 @@ class EventMetadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "2.0"
+    schema_version: str = "3.0"
     event_id: str
     event_type: Literal["left_lane_review_candidate"] = "left_lane_review_candidate"
-    review_status: Literal["pending_human_review"] = "pending_human_review"
+    review_status: Literal[
+        "collecting_evidence", "pending_human_review", "cancelled"
+    ] = "collecting_evidence"
     human_review_required: bool = True
     enforcement_action: Literal["none"] = "none"
     track_id: int
@@ -313,3 +482,12 @@ class EventMetadata(BaseModel):
     overtaking_assessment: OvertakingAssessmentMetadata | Literal["not_implemented"] = (
         "not_implemented"
     )
+    candidate_lifecycle: CandidateLifecycleMetadata | None = None
+    decision_history: list[CandidateDecisionMetadata] = Field(default_factory=list)
+    calibration_status: CalibrationStatusMetadata | None = None
+    camera_motion: CameraMotionMetadata | None = None
+    speed_estimate: SpeedEstimateMetadata | None = None
+    image_position: tuple[float, float] | None = None
+    normalized_position: tuple[float, float] | None = None
+    world_position: tuple[float, float] | None = None
+    coordinate_mode: str = "normalized_image"

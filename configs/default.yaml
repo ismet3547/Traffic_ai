@@ -52,11 +52,53 @@ road_position:
   # Longitudinal progress increases toward the top of this example image.
   travel_direction: toward_top
 
+# Safe default: no physical units are inferred. Homography failures only fall
+# back when fallback_to_normalized is explicitly true.
+calibration:
+  mode: normalized
+  world_units: meters
+  image_points: []
+  world_points: []
+  fallback_to_normalized: true
+  maximum_reprojection_error_pixels: 5.0
+  minimum_confidence_for_physical_measurements: 0.55
+  suppress_candidates_when_unreliable: false
+  world_longitudinal_axis: y
+  world_longitudinal_direction: positive
+
+speed_estimation:
+  enabled: true
+  minimum_window_seconds: 0.8
+  maximum_window_seconds: 2.5
+  minimum_samples: 5
+  smoothing: median
+  max_reasonable_speed_kph: 220.0
+  max_position_jump_meters: 20.0
+  tracker_gap_grace_seconds: 0.5
+
+# "none" is the production-safe fixed-camera default. feature_based is an
+# experimental diagnostic and does not stabilize or warp frames.
+camera_motion:
+  mode: none
+  maximum_features: 250
+  minimum_tracked_features: 12
+  excessive_translation_pixels: 8.0
+  minimum_confidence: 0.35
+  mask_vehicle_boxes: true
+
+candidate_lifecycle:
+  invalidation_grace_seconds: 2.0
+  suspension_grace_seconds: 3.0
+  finalize_after_seconds: 5.0
+  restart_cooldown_seconds: 1.5
+  maximum_decision_history_entries: 32
+
 traffic_context:
   history_seconds: 12.0
   minimum_history_seconds: 2.0
   maximum_samples_per_track: 900
   nearby_longitudinal_window_normalized: 0.25
+  nearby_longitudinal_window_meters: 75.0
 
 lane_change:
   confirmation_seconds: 0.4
@@ -69,7 +111,10 @@ overtaking:
   completion_timeout_seconds: 15.0
   minimum_confidence: 0.65
   entry_target_max_gap_normalized: 0.20
+  entry_target_max_gap_meters: 60.0
   pass_order_margin_normalized: 0.01
+  pass_order_margin_meters: 1.5
+  minimum_relative_speed_mps: 0.8
   post_overtake_grace_seconds: 2.0
   related_track_lost_grace_seconds: 1.0
 
@@ -83,9 +128,12 @@ congestion:
   dense_max_motion_per_second_normalized: 0.04
 
 right_lane_opportunity:
+  mode: auto
   minimum_available_seconds: 3.0
   front_gap_normalized: 0.08
   rear_gap_normalized: 0.06
+  minimum_front_gap_m: 20.0
+  minimum_rear_gap_m: 15.0
   minimum_confidence: 0.60
   state_ttl_seconds: 2.0
 
@@ -98,7 +146,7 @@ rules:
     minimum_mean_confidence: 0.25
     minimum_evidence_confidence: 0.65
     overtaking_clearance_mode: contextual
-    policy_version: "2.0"
+    policy_version: "3.0"
 
 output:
   directory: output
@@ -108,3 +156,8 @@ output:
   representative_image_quality: 92
   clip_pre_event_seconds: 2.0
   clip_max_duration_seconds: 12.0
+  show_advanced_debug: true
+  show_coordinates: true
+  show_speed: true
+  show_gaps: true
+  show_lifecycle: true

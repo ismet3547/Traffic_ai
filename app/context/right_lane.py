@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from app.config import RightLaneOpportunityConfig
-from app.models import CongestionLevel, TrafficFrameContext
+from app.models import (
+    CongestionLevel,
+    GapEstimate,
+    NeighborReference,
+    TrafficFrameContext,
+)
 
 
 @dataclass(slots=True)
@@ -46,31 +51,63 @@ class RightLaneOpportunityTracker:
             if vehicle_context.adjacent_right_lane_id is None:
                 available: bool | None = None
                 confidence = 0.0
+                opportunity_mode = "unavailable"
             else:
-                front_clear = (
-                    neighbors.adjacent_right_ahead is None
-                    or neighbors.adjacent_right_ahead.longitudinal_gap
-                    >= self._config.front_gap_normalized
+                front_reference = neighbors.adjacent_right_ahead
+                rear_reference = neighbors.adjacent_right_behind
+                gap_unit = next(
+                    (
+                        reference.gap_unit
+                        for reference in (front_reference, rear_reference)
+                        if reference is not None
+                    ),
+                    "meters"
+                    if context.positions[track_id].calibrated
+                    else "normalized",
                 )
-                rear_clear = (
-                    neighbors.adjacent_right_behind is None
-                    or neighbors.adjacent_right_behind.longitudinal_gap
-                    >= self._config.rear_gap_normalized
-                )
-                available = front_clear and rear_clear and not congested
-                observed_bounds = sum(
-                    reference is not None
-                    for reference in (
-                        neighbors.adjacent_right_ahead,
-                        neighbors.adjacent_right_behind,
+                use_meters = gap_unit == "meters" and self._config.mode != "normalized"
+                if self._config.mode == "calibrated" and gap_unit != "meters":
+                    available = None
+                    confidence = 0.0
+                    opportunity_mode = "unavailable_uncalibrated"
+                    front_clear = rear_clear = False
+                else:
+                    opportunity_mode = "calibrated" if use_meters else "normalized"
+                    front_threshold = (
+                        self._config.minimum_front_gap_m
+                        if use_meters
+                        else self._config.front_gap_normalized
                     )
-                )
-                confidence = min(
-                    1.0,
-                    0.70
-                    + 0.10 * observed_bounds
-                    + 0.10 * context.global_context.confidence,
-                )
+                    rear_threshold = (
+                        self._config.minimum_rear_gap_m
+                        if use_meters
+                        else self._config.rear_gap_normalized
+                    )
+                    front_clear = (
+                        front_reference is None
+                        or front_reference.longitudinal_gap >= front_threshold
+                    )
+                    rear_clear = (
+                        rear_reference is None
+                        or rear_reference.longitudinal_gap >= rear_threshold
+                    )
+                    available = front_clear and rear_clear and not congested
+                    observed_bounds = sum(
+                        reference is not None
+                        for reference in (front_reference, rear_reference)
+                    )
+                    position_confidence = (
+                        context.positions[track_id].calibration_confidence
+                        if use_meters
+                        else 0.65
+                    )
+                    confidence = min(
+                        1.0,
+                        0.55
+                        + 0.10 * observed_bounds
+                        + 0.15 * context.global_context.confidence
+                        + 0.20 * position_confidence,
+                    )
 
             if available:
                 if state.available_since is None:
@@ -84,6 +121,9 @@ class RightLaneOpportunityTracker:
                 right_lane_available=available,
                 right_lane_available_seconds=duration,
                 right_lane_confidence=confidence,
+                right_lane_front_gap=_gap_estimate(neighbors.adjacent_right_ahead),
+                right_lane_rear_gap=_gap_estimate(neighbors.adjacent_right_behind),
+                right_lane_opportunity_mode=opportunity_mode,
             )
 
         for track_id, state in list(self._states.items()):
@@ -96,4 +136,16 @@ class RightLaneOpportunityTracker:
             global_context=context.global_context,
             vehicles=updated,
             positions=context.positions,
+            speeds=context.speeds,
         )
+
+
+def _gap_estimate(reference: NeighborReference | None) -> GapEstimate | None:
+    if reference is None:
+        return None
+    return GapEstimate(
+        value=reference.longitudinal_gap,
+        unit=reference.gap_unit,
+        confidence=reference.confidence,
+        coordinate_mode=reference.coordinate_mode,
+    )

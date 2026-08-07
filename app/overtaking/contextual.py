@@ -11,6 +11,7 @@ from app.models import (
     OvertakeState,
     OvertakingAssessment,
     OvertakingStatus,
+    SpeedEstimate,
     TrafficFrameContext,
 )
 from app.motion import MotionHistoryStore
@@ -26,7 +27,9 @@ class NoOvertakingPolicy:
         transitions: list[LaneTransition],
         context: TrafficFrameContext,
         history: MotionHistoryStore,
+        speeds: dict[int, SpeedEstimate] | None = None,
     ) -> dict[int, OvertakingAssessment]:
+        del speeds
         return {
             observation.vehicle.track_id: OvertakingAssessment(
                 track_id=observation.vehicle.track_id,
@@ -71,10 +74,11 @@ class ContextualOvertakingPolicy:
         transitions: list[LaneTransition],
         context: TrafficFrameContext,
         history: MotionHistoryStore,
+        speeds: dict[int, SpeedEstimate] | None = None,
     ) -> dict[int, OvertakingAssessment]:
         if not self._config.enabled:
             return NoOvertakingPolicy().update(
-                timestamp_seconds, observations, transitions, context, history
+                timestamp_seconds, observations, transitions, context, history, speeds
             )
 
         lane_by_track = {
@@ -106,6 +110,7 @@ class ContextualOvertakingPolicy:
                 transition,
                 timestamp_seconds,
                 context,
+                speeds or {},
             )
             assessments[track_id] = self._assessment(attempt, track_id, history)
         seen_ids = {observation.vehicle.track_id for observation in observations}
@@ -131,7 +136,8 @@ class ContextualOvertakingPolicy:
                 transition, timestamp_seconds, history
             )
         evidence = [
-            f"entered_left_from_{transition.from_lane}_at_{transition.timestamp_seconds:.2f}"
+            "TARGET_ENTERED_LEFT_LANE",
+            f"entered_left_from_{transition.from_lane}_at_{transition.timestamp_seconds:.2f}",
         ]
         if related_track_id is not None:
             evidence.append(f"vehicle_{related_track_id}_ahead_in_previous_lane")
@@ -156,9 +162,10 @@ class ContextualOvertakingPolicy:
         if vehicle_context is None:
             return None
         ahead = vehicle_context.neighbors.adjacent_right_ahead
-        if (
-            ahead is not None
-            and ahead.longitudinal_gap <= self._config.entry_target_max_gap_normalized
+        if ahead is not None and ahead.longitudinal_gap <= (
+            self._config.entry_target_max_gap_meters
+            if ahead.gap_unit == "meters"
+            else self._config.entry_target_max_gap_normalized
         ):
             return ahead.track_id
         return None
@@ -185,9 +192,13 @@ class ContextualOvertakingPolicy:
             ):
                 continue
             gap = other.longitudinal_position - target.longitudinal_position
-            if 0 < gap <= self._config.entry_target_max_gap_normalized and (
-                best is None or gap < best[0]
-            ):
+            maximum_gap = (
+                self._config.entry_target_max_gap_meters
+                if target.coordinate_mode == "calibrated_world"
+                and other.coordinate_mode == "calibrated_world"
+                else self._config.entry_target_max_gap_normalized
+            )
+            if 0 < gap <= maximum_gap and (best is None or gap < best[0]):
                 best = (gap, other_id)
         return best[1] if best else None
 
@@ -199,6 +210,7 @@ class ContextualOvertakingPolicy:
         transition: LaneTransition | None,
         timestamp_seconds: float,
         context: TrafficFrameContext,
+        speeds: dict[int, SpeedEstimate],
     ) -> None:
         if (
             attempt.state in {OvertakeState.ENTERED_LEFT, OvertakeState.PASSING}
@@ -214,6 +226,7 @@ class ContextualOvertakingPolicy:
                 attempt.evidence.append(
                     f"returned_right_at_{transition.timestamp_seconds:.2f}"
                 )
+                _append_once(attempt.evidence, "RETURNED_RIGHT")
                 attempt.state = OvertakeState.COMPLETED
             elif attempt.state in {OvertakeState.ENTERED_LEFT, OvertakeState.PASSING}:
                 attempt.state = OvertakeState.ABORTED
@@ -228,7 +241,22 @@ class ContextualOvertakingPolicy:
             attempt.last_related_seen_at = timestamp_seconds
             attempt.related_temporarily_missing = False
             relative = related_position.longitudinal - target_position.longitudinal
-            margin = self._config.pass_order_margin_normalized
+            margin = (
+                self._config.pass_order_margin_meters
+                if target_position.calibrated and related_position.calibrated
+                else self._config.pass_order_margin_normalized
+            )
+            target_speed = speeds.get(track_id)
+            related_speed = speeds.get(related_id) if related_id is not None else None
+            if (
+                target_speed is not None
+                and related_speed is not None
+                and target_speed.speed_mps is not None
+                and related_speed.speed_mps is not None
+                and target_speed.speed_mps - related_speed.speed_mps
+                >= self._config.minimum_relative_speed_mps
+            ):
+                _append_once(attempt.evidence, "TARGET_GAINING_ON_VEHICLE")
             if relative > margin and attempt.state in {
                 OvertakeState.ENTERED_LEFT,
                 OvertakeState.PASSING,
@@ -240,6 +268,8 @@ class ContextualOvertakingPolicy:
             }:
                 attempt.state = OvertakeState.PASSED_TARGET
                 attempt.completed_at = timestamp_seconds
+                _append_once(attempt.evidence, "RELATIVE_ORDER_CHANGED")
+                _append_once(attempt.evidence, "TARGET_PASSED_VEHICLE")
                 attempt.evidence.append(
                     f"relative_order_reversed_with_vehicle_{related_id}_at_{timestamp_seconds:.2f}"
                 )
@@ -277,13 +307,17 @@ class ContextualOvertakingPolicy:
             confidence = 0.40
         elif attempt.state in {OvertakeState.ENTERED_LEFT, OvertakeState.PASSING}:
             status = OvertakingStatus.LIKELY_OVERTAKING
-            confidence = 0.65
+            confidence = (
+                0.78 if "TARGET_GAINING_ON_VEHICLE" in attempt.evidence else 0.65
+            )
         elif attempt.state in {
             OvertakeState.PASSED_TARGET,
             OvertakeState.RETURNING_RIGHT,
             OvertakeState.COMPLETED,
         }:
             confidence = 0.90 if attempt.state != OvertakeState.COMPLETED else 0.98
+            if "TARGET_GAINING_ON_VEHICLE" in attempt.evidence:
+                confidence = min(1.0, confidence + 0.05)
             status = (
                 OvertakingStatus.OVERTAKING_CONFIRMED
                 if confidence >= self._config.minimum_confidence
@@ -332,3 +366,8 @@ class ContextualOvertakingPolicy:
             confidence=0.30,
             evidence=("minimum_motion_history_not_reached",),
         )
+
+
+def _append_once(evidence: list[str], code: str) -> None:
+    if code not in evidence:
+        evidence.append(code)

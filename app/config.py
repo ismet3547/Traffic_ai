@@ -78,6 +78,7 @@ class TrafficContextConfig(StrictModel):
     minimum_history_seconds: float = Field(default=2.0, ge=0)
     maximum_samples_per_track: int = Field(default=900, ge=2)
     nearby_longitudinal_window_normalized: float = Field(default=0.25, gt=0, le=1)
+    nearby_longitudinal_window_meters: float = Field(default=75.0, gt=0)
 
     @model_validator(mode="after")
     def validate_history_window(self) -> TrafficContextConfig:
@@ -97,13 +98,87 @@ class RoadPositionConfig(StrictModel):
     travel_direction: Literal["toward_top", "toward_bottom"] = "toward_top"
 
 
+class CalibrationConfig(StrictModel):
+    """Optional mapping from image pixels to a measured road plane."""
+
+    mode: Literal["normalized", "homography"] = "normalized"
+    world_units: Literal["meters"] = "meters"
+    image_points: list[tuple[float, float]] = Field(default_factory=list)
+    world_points: list[tuple[float, float]] = Field(default_factory=list)
+    fallback_to_normalized: bool = True
+    maximum_reprojection_error_pixels: float = Field(default=5.0, gt=0)
+    minimum_confidence_for_physical_measurements: float = Field(
+        default=0.55, ge=0, le=1
+    )
+    suppress_candidates_when_unreliable: bool = False
+    world_longitudinal_axis: Literal["x", "y"] = "y"
+    world_longitudinal_direction: Literal["positive", "negative"] = "positive"
+
+    @model_validator(mode="after")
+    def validate_correspondences(self) -> CalibrationConfig:
+        if self.mode == "normalized":
+            return self
+        if len(self.image_points) != len(self.world_points):
+            raise ValueError("image_points and world_points must have equal length")
+        if len(self.image_points) < 4:
+            raise ValueError(
+                "homography calibration requires at least four point pairs"
+            )
+        for name, points in (
+            ("image_points", self.image_points),
+            ("world_points", self.world_points),
+        ):
+            if len(set(points)) != len(points):
+                raise ValueError(f"{name} must not contain duplicate points")
+            if not _contains_non_collinear_triplet(points):
+                raise ValueError(f"{name} are degenerate (all points are collinear)")
+        return self
+
+
+class SpeedEstimationConfig(StrictModel):
+    enabled: bool = True
+    minimum_window_seconds: float = Field(default=0.8, gt=0)
+    maximum_window_seconds: float = Field(default=2.5, gt=0)
+    minimum_samples: int = Field(default=5, ge=2)
+    smoothing: Literal["median", "linear_regression"] = "median"
+    max_reasonable_speed_kph: float = Field(default=220.0, gt=0)
+    max_position_jump_meters: float = Field(default=20.0, gt=0)
+    tracker_gap_grace_seconds: float = Field(default=0.5, ge=0)
+
+    @model_validator(mode="after")
+    def validate_windows(self) -> SpeedEstimationConfig:
+        if self.minimum_window_seconds > self.maximum_window_seconds:
+            raise ValueError("minimum speed window cannot exceed maximum speed window")
+        return self
+
+
+class CameraMotionConfig(StrictModel):
+    mode: Literal["none", "feature_based"] = "none"
+    maximum_features: int = Field(default=250, ge=20)
+    minimum_tracked_features: int = Field(default=12, ge=4)
+    excessive_translation_pixels: float = Field(default=8.0, gt=0)
+    minimum_confidence: float = Field(default=0.35, ge=0, le=1)
+    mask_vehicle_boxes: bool = True
+
+
+class CandidateLifecycleConfig(StrictModel):
+    invalidation_grace_seconds: float = Field(default=2.0, ge=0)
+    suspension_grace_seconds: float = Field(default=3.0, ge=0)
+    finalize_after_seconds: float = Field(default=5.0, ge=0)
+    restart_cooldown_seconds: float = Field(default=1.5, ge=0)
+    maximum_decision_history_entries: int = Field(default=32, ge=4, le=256)
+
+
 class OvertakingConfig(StrictModel):
     enabled: bool = True
     observation_window_seconds: float = Field(default=10.0, gt=0)
     completion_timeout_seconds: float = Field(default=15.0, gt=0)
     minimum_confidence: float = Field(default=0.65, ge=0, le=1)
     entry_target_max_gap_normalized: float = Field(default=0.20, gt=0, le=1)
+    entry_target_max_gap_meters: float = Field(default=60.0, gt=0)
     pass_order_margin_normalized: float = Field(default=0.01, ge=0, le=0.25)
+    pass_order_margin_meters: float = Field(default=1.5, ge=0)
+    minimum_relative_speed_mps: float = Field(default=0.8, ge=0)
     post_overtake_grace_seconds: float = Field(default=2.0, ge=0)
     related_track_lost_grace_seconds: float = Field(default=1.0, ge=0)
 
@@ -134,9 +209,12 @@ class CongestionConfig(StrictModel):
 
 
 class RightLaneOpportunityConfig(StrictModel):
+    mode: Literal["auto", "normalized", "calibrated"] = "auto"
     minimum_available_seconds: float = Field(default=3.0, ge=0)
     front_gap_normalized: float = Field(default=0.08, gt=0, le=1)
     rear_gap_normalized: float = Field(default=0.06, gt=0, le=1)
+    minimum_front_gap_m: float = Field(default=20.0, gt=0)
+    minimum_rear_gap_m: float = Field(default=15.0, gt=0)
     minimum_confidence: float = Field(default=0.60, ge=0, le=1)
     state_ttl_seconds: float = Field(default=2.0, gt=0)
 
@@ -149,7 +227,7 @@ class LeftLaneRuleConfig(StrictModel):
     minimum_mean_confidence: float = Field(default=0.25, ge=0, le=1)
     minimum_evidence_confidence: float = Field(default=0.65, ge=0, le=1)
     overtaking_clearance_mode: Literal["none", "contextual"] = "contextual"
-    policy_version: str = Field(default="2.0", min_length=1)
+    policy_version: str = Field(default="3.0", min_length=1)
 
 
 class RulesConfig(StrictModel):
@@ -164,6 +242,11 @@ class OutputConfig(StrictModel):
     representative_image_quality: int = Field(default=92, ge=1, le=100)
     clip_pre_event_seconds: float = Field(default=2.0, ge=0)
     clip_max_duration_seconds: float = Field(default=12.0, gt=0)
+    show_advanced_debug: bool = True
+    show_coordinates: bool = True
+    show_speed: bool = True
+    show_gaps: bool = True
+    show_lifecycle: bool = True
 
     @model_validator(mode="after")
     def validate_codec(self) -> OutputConfig:
@@ -182,6 +265,14 @@ class AppConfig(StrictModel):
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     lanes: LanesConfig
     road_position: RoadPositionConfig = Field(default_factory=RoadPositionConfig)
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    speed_estimation: SpeedEstimationConfig = Field(
+        default_factory=SpeedEstimationConfig
+    )
+    camera_motion: CameraMotionConfig = Field(default_factory=CameraMotionConfig)
+    candidate_lifecycle: CandidateLifecycleConfig = Field(
+        default_factory=CandidateLifecycleConfig
+    )
     traffic_context: TrafficContextConfig = Field(default_factory=TrafficContextConfig)
     lane_change: LaneChangeConfig = Field(default_factory=LaneChangeConfig)
     overtaking: OvertakingConfig = Field(default_factory=OvertakingConfig)
@@ -210,3 +301,18 @@ def load_config(path: str | Path) -> AppConfig:
     with config_path.open("r", encoding="utf-8") as stream:
         raw = yaml.safe_load(stream) or {}
     return AppConfig.model_validate(raw)
+
+
+def _contains_non_collinear_triplet(points: list[tuple[float, float]]) -> bool:
+    """Return whether at least one triple spans a non-zero area."""
+
+    for first_index in range(len(points) - 2):
+        x1, y1 = points[first_index]
+        for second_index in range(first_index + 1, len(points) - 1):
+            x2, y2 = points[second_index]
+            for third_index in range(second_index + 1, len(points)):
+                x3, y3 = points[third_index]
+                twice_area = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
+                if abs(twice_area) > 1e-9:
+                    return True
+    return False

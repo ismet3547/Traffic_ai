@@ -24,11 +24,18 @@ Official validation/test reports use protocol `2` and one config: temporal IoU `
 
 Keep annotation JSON and manifest YAML in Git; keep large or third-party videos out of Git unless their redistribution rights are explicit.
 
+## Mini pilot
+
+Phase 4.3 starts with 5–10 legally usable real clips (roughly 10–30 minutes), not the later 30–50 clip scale-up. At present there are zero registered real clips; no real benchmark or accuracy result is claimed. `pilot/mini_pilot_manifest.json` freezes pilot, ontology, handbook, and canonical-agreement identity. `python -m app.tools.pilot_status` derives progress from validated artifacts and reports blockers without treating file names as completion.
+
+Use `docs/mini_pilot_operator_checklist.md`. Validation/test clips require blind locked A/B annotation and canonical agreement. Adjudicated GT must be finalized and locked before any model-output review. The first untouched clean benchmark run is preserved with `python -m app.tools.freeze_pilot_baseline`; an existing `pilot_baseline_0` is never overwritten. **Mini-pilot sample size is too small for production accuracy claims.**
+
 ```text
 data/benchmark/
   annotations/       # schema 1.0 ground truth
   manifests/         # scenario lists, splits, configs, matching settings
   predictions/       # tiny synthetic cache only; real caches normally go to benchmark_output/
+  pilot/             # real mini-pilot identity, status, logs, and summaries
   videos/            # local raw videos, ignored by Git
   examples/           # synthetic report generated from committed fixtures
 ```

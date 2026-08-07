@@ -525,6 +525,32 @@ python -m app.tools.run_agreement_protocol_scenarios --output benchmark_output/p
 
 The scenarios cover canonical reports, a permissive exploratory inflation attempt, mixed configs, an old protocol report, and regeneration under the current protocol.
 
+### Phase 4.3 mini pilot operation
+
+No legally registered real footage is currently present, so Phase 4.3 is operationally ready but honestly blocked. Synthetic videos, annotations, predictions, and metrics are never counted as real pilot progress. The initial status is:
+
+```text
+REAL PILOT STATUS: BLOCKED — NO REAL SOURCE VIDEO REGISTERED
+registered=0  double_annotated=0  adjudicated=0
+benchmark_exported=0  inference_complete=0  benchmark_complete=0
+```
+
+The frozen pilot identity and artifact layout live in `data/benchmark/pilot/mini_pilot_manifest.json`. The status tool validates actual registry, annotation, canonical agreement, locked adjudication, release/GT, source-bound prediction, and benchmark artifacts before incrementing a stage:
+
+```powershell
+python -m app.tools.pilot_status --manifest data/benchmark/pilot/mini_pilot_manifest.json --output-json data/benchmark/pilot/pilot_status.json --output-markdown data/benchmark/pilot/pilot_status.md
+```
+
+Follow `docs/mini_pilot_operator_checklist.md` for the complete register → blind A/B annotation → canonical agreement → adjudication → release → GT export → untouched inference/benchmark → failure-review sequence. After the first 3–5 double-annotated clips, annotation pauses for an agreement review. Model output must remain hidden until adjudicated GT is finalized and locked.
+
+The first real completed run is copied to a never-overwritten `pilot_baseline_0` only when the report is non-synthetic, source identities are verified, the worktree was clean, exact commit/config/detector/tracker/protocol identities are present, and every selected clip has locked released GT:
+
+```powershell
+python -m app.tools.freeze_pilot_baseline --manifest data/benchmark/pilot/mini_pilot_manifest.json
+```
+
+Only a frozen baseline authorizes post-hoc FP/FN review. It does not authorize tuning on validation clips or a production-accuracy claim. **Mini-pilot sample size is too small for production accuracy claims.**
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:
@@ -542,7 +568,7 @@ The committed mypy and pyright configurations cover the benchmark package and it
 CLI tools introduced in Phase 4. This keeps benchmark-integrity checks reproducible
 without claiming that unrelated legacy production modules are already fully typed.
 
-Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, synthetic pipeline flows, annotation roles, adversarial ignore overlaps, optimal matching, duration evidence mismatch, accounting invariants, comparable/non-comparable baselines, failure diagnostics, reports, annotator agreement, and cache-only benchmark replay.
+Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, synthetic pipeline flows, annotation roles, adversarial ignore overlaps, optimal matching, duration evidence mismatch, accounting invariants, comparable/non-comparable baselines, failure diagnostics, reports, annotator agreement, cache-only benchmark replay, truthful mini-pilot stage accounting, locked-GT review gating, and immutable pilot baselines.
 
 ## Known limitations
 

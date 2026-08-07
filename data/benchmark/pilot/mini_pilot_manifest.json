@@ -1,0 +1,36 @@
+{
+  "agreement_protocol": {
+    "aggregation_version": "1",
+    "agreement_config": {
+      "boundary_tolerance_seconds": 1.0,
+      "minimum_temporal_iou": 0.3,
+      "require_vehicle_reference_match": true
+    },
+    "config_fingerprint": "193976432ac566cce128f869cc85cd0cc90b1ecc3939ed316c92c3671e874c95",
+    "config_version": "1",
+    "handbook_version": "1.0",
+    "ontology_version": "pilot-1",
+    "protocol_version": "2"
+  },
+  "artifacts": {
+    "adjudications_directory": "adjudications",
+    "agreements_directory": "agreements",
+    "annotations_directory": "annotations",
+    "baseline_directory": "../../../benchmark_output/mini-pilot-001/pilot_baseline_0",
+    "benchmark_manifest": "benchmark_manifest.yaml",
+    "benchmark_run_directory": "../../../benchmark_output/mini-pilot-001/current_run",
+    "dataset_release": "dataset_release.json",
+    "ground_truth_directory": "ground_truth",
+    "registry": "../intake_registry.json"
+  },
+  "clips": [],
+  "dataset_version": "pilot-0.1",
+  "failure_review_completed": false,
+  "first_agreement_review_video_ids": [],
+  "frozen_at": "2026-08-08T00:00:00Z",
+  "handbook_version": "1.0",
+  "ontology_version": "pilot-1",
+  "pilot_id": "mini-pilot-001",
+  "scale_up_recommendation": "NOT_ASSESSED",
+  "schema_version": "1.0"
+}

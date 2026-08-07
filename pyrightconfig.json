@@ -17,7 +17,9 @@
     "app/tools/run_synthetic_annotation_lifecycle.py",
     "app/tools/run_release_integrity_scenarios.py",
     "app/tools/run_agreement_integrity_scenarios.py",
-    "app/tools/run_agreement_protocol_scenarios.py"
+    "app/tools/run_agreement_protocol_scenarios.py",
+    "app/tools/pilot_status.py",
+    "app/tools/freeze_pilot_baseline.py"
   ],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic",

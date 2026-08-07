@@ -1,0 +1,34 @@
+{
+  "accuracy_warning": "Mini-pilot sample size is too small for production accuracy claims.",
+  "annotation_effort_mean_minutes_per_pass": null,
+  "annotation_effort_total_minutes": null,
+  "blockers": [
+    {
+      "code": "NO_REAL_SOURCE_VIDEO_REGISTERED",
+      "details": "No real clip is selected in the pilot manifest; register and explicitly add the first legally usable source video.",
+      "video_id": null
+    }
+  ],
+  "counts": {
+    "adjudicated_clips": 0,
+    "agreement_ready_clips": 0,
+    "benchmark_complete_clips": 0,
+    "benchmark_exported_clips": 0,
+    "double_annotated_clips": 0,
+    "inference_complete_clips": 0,
+    "real_world_confirmed_clips": 0,
+    "registered_clips": 0,
+    "selected_clips": 0,
+    "total_duration_seconds": 0.0
+  },
+  "first_agreement_review_completed": false,
+  "first_agreement_review_required": false,
+  "pilot_baseline_frozen": false,
+  "pilot_executed": false,
+  "pilot_id": "mini-pilot-001",
+  "posthoc_model_review_allowed": false,
+  "real_pilot_status": "REAL PILOT STATUS: BLOCKED — NO REAL SOURCE VIDEO REGISTERED",
+  "scale_up_recommendation": "NOT_ASSESSED",
+  "scenario_tag_counts": {},
+  "schema_version": "1.0"
+}

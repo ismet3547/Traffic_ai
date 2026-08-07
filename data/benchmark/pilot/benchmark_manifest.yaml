@@ -1,0 +1,41 @@
+schema_version: "1.0"
+name: mini-pilot-001-baseline-0
+synthetic: false
+
+# Do not tune these settings after inspecting individual pilot clips. Any later
+# change must produce a new comparable run; pilot_baseline_0 is immutable.
+benchmark:
+  matching:
+    minimum_temporal_iou: 0.30
+    start_tolerance_seconds: 2.0
+    require_track_association_if_available: false
+  ignored_regions:
+    enabled: true
+    minimum_prediction_coverage: 0.50
+    minimum_temporal_iou: 0.0
+    allowed_labels: [insufficient_evidence]
+  control_events:
+    minimum_prediction_coverage: 0.50
+    minimum_temporal_iou: 0.20
+  duration_validation:
+    absolute_tolerance_seconds: 1.0
+    relative_tolerance: 0.01
+    require_multiple_sources_for_acceptance: true
+  minimum_prediction_confidence: 0.50
+  headline_confidences: [high]
+  acceptance:
+    minimum_precision: null
+    minimum_recall: null
+    maximum_false_positives_per_hour: null
+  baseline_tolerances:
+    precision: 0.001
+    recall: 0.001
+    f1: 0.001
+    false_positives_per_hour: 0.05
+    processing_fps: 0.10
+  failure_artifacts: true
+  failure_clip_padding_seconds: 2.0
+
+# Add only released, adjudicated GT entries. Keep development and validation
+# explicit. Do not enable an entry until its adjudication is finalized/locked.
+videos: []

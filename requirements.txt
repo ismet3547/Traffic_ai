@@ -7,3 +7,5 @@ ultralytics>=8.3,<9
 supervision>=0.25,<0.28
 pytest>=8,<9
 ruff>=0.8,<1
+mypy>=1.11,<2
+pyright>=1.1.390,<2

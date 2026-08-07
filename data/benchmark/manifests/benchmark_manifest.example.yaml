@@ -7,6 +7,20 @@ benchmark:
     minimum_temporal_iou: 0.30
     start_tolerance_seconds: 2.0
     require_track_association_if_available: false
+  ignored_regions:
+    enabled: true
+    # Coverage of the prediction, not merely any overlap, is mandatory.
+    minimum_prediction_coverage: 0.50
+    minimum_temporal_iou: 0.0
+    allowed_labels: [insufficient_evidence]
+  control_events:
+    minimum_prediction_coverage: 0.50
+    minimum_temporal_iou: 0.20
+  duration_validation:
+    absolute_tolerance_seconds: 1.0
+    relative_tolerance: 0.01
+    require_multiple_sources_for_acceptance: true
+  minimum_prediction_confidence: 0.50
   headline_confidences: [high]
   acceptance:
     minimum_precision: null

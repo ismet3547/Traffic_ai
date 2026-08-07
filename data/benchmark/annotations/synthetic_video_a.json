@@ -3,35 +3,68 @@
   "video_id": "synthetic_video_a",
   "source_file": "synthetic://video_a",
   "fps": 30.0,
-  "video_duration_seconds": 120.0,
+  "video_duration_seconds": 200.0,
   "annotator_id": "annotator_a",
   "events": [
     {
-      "event_id": "gt_violation_001",
+      "event_id": "gt_positive_001",
       "vehicle_track_hint": 11,
       "start_seconds": 10.0,
       "end_seconds": 20.0,
       "label": "unnecessary_left_lane_occupation",
-      "confidence": "high",
-      "notes": "Synthetic positive event."
+      "role": "positive",
+      "confidence": "high"
     },
     {
-      "event_id": "gt_violation_002",
+      "event_id": "gt_positive_002",
       "vehicle_track_hint": 22,
       "start_seconds": 30.0,
       "end_seconds": 40.0,
       "label": "unnecessary_left_lane_occupation",
-      "confidence": "high",
-      "notes": "Synthetic positive event."
+      "role": "positive",
+      "confidence": "high"
     },
     {
-      "event_id": "gt_overtake_001",
+      "event_id": "gt_positive_003",
       "vehicle_track_hint": 33,
       "start_seconds": 50.0,
       "end_seconds": 60.0,
+      "label": "unnecessary_left_lane_occupation",
+      "role": "positive",
+      "confidence": "high"
+    },
+    {
+      "event_id": "gt_overtake_001",
+      "start_seconds": 70.0,
+      "end_seconds": 80.0,
       "label": "legitimate_overtaking",
+      "role": "negative_control",
+      "confidence": "high"
+    },
+    {
+      "event_id": "gt_overtake_002",
+      "start_seconds": 90.0,
+      "end_seconds": 100.0,
+      "label": "legitimate_overtaking",
+      "role": "negative_control",
+      "confidence": "high"
+    },
+    {
+      "event_id": "gt_congestion_001",
+      "start_seconds": 110.0,
+      "end_seconds": 120.0,
+      "label": "congestion_left_lane_use",
+      "role": "negative_control",
+      "confidence": "high"
+    },
+    {
+      "event_id": "gt_ignore_001",
+      "start_seconds": 130.0,
+      "end_seconds": 150.0,
+      "label": "insufficient_evidence",
+      "role": "ignore_region",
       "confidence": "high",
-      "notes": "Synthetic negative-control event."
+      "notes": "The only semantic ignore region in this integrity fixture."
     }
   ]
 }

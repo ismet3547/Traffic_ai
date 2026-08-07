@@ -12,6 +12,7 @@
       "start_seconds": 12.4,
       "end_seconds": 21.0,
       "label": "unnecessary_left_lane_occupation",
+      "role": "positive",
       "confidence": "high",
       "notes": "EXAMPLE ONLY: replace this interval and label after reviewing the video."
     }

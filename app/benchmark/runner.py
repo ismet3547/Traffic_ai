@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -17,6 +18,11 @@ import yaml
 
 from app.benchmark.adapter import prediction_document_from_run
 from app.benchmark.annotations import resolve_manifest_path
+from app.benchmark.fingerprints import (
+    canonical_sha256,
+    dataset_fingerprint_payload,
+    evaluation_fingerprint_payload,
+)
 from app.benchmark.models import (
     BenchmarkManifest,
     ManifestVideo,
@@ -218,8 +224,15 @@ def build_reproducibility_snapshot(
         "benchmark_manifest": manifest.model_dump(mode="json"),
         "production_configs": dict(sorted(production_configs.items())),
     }
-    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
-    config_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    resolved_config_hash = canonical_sha256(snapshot)
+    dataset_payload = dataset_fingerprint_payload(
+        manifest_path,
+        videos,
+        annotation_hashes,
+        sorted(annotation_versions),
+    )
+    evaluation_payload = evaluation_fingerprint_payload(manifest.benchmark)
+    production_config_hash = canonical_sha256(dict(sorted(production_configs.items())))
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
     with (output / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
@@ -227,7 +240,13 @@ def build_reproducibility_snapshot(
     return {
         "git_commit": git_commit,
         "git_worktree_dirty": git_dirty,
-        "config_hash_sha256": config_hash,
+        "config_hash_sha256": resolved_config_hash,
+        "resolved_config_hash_sha256": resolved_config_hash,
+        "production_config_hash_sha256": production_config_hash,
+        "dataset_fingerprint": canonical_sha256(dataset_payload),
+        "dataset_fingerprint_payload": dataset_payload,
+        "evaluation_fingerprint": canonical_sha256(evaluation_payload),
+        "evaluation_fingerprint_payload": evaluation_payload,
         "benchmark_schema_version": manifest.schema_version,
         "annotation_schema_versions": sorted(annotation_versions),
         "annotation_hashes_sha256": dict(sorted(annotation_hashes.items())),
@@ -262,8 +281,7 @@ def hardware_metadata(configured_device: str | None = None) -> dict[str, Any]:
         "gpu_name": None,
     }
     try:
-        import torch
-
+        torch: Any = importlib.import_module("torch")
         if execution_class == "gpu_configured" and torch.cuda.is_available():
             result["gpu_name"] = torch.cuda.get_device_name(0)
     except ImportError:  # pragma: no cover - ultralytics normally provides torch

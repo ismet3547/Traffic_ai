@@ -56,8 +56,13 @@ def load_video_annotations(
                 f"annotation source_file {document.source_file!r} does not match "
                 f"manifest video file {Path(video.path).name!r}"
             )
-        duration = video.duration_seconds or document.video_duration_seconds
-        if duration is not None:
+        durations = [
+            ("manifest", video.duration_seconds),
+            ("annotation", document.video_duration_seconds),
+        ]
+        for source, duration in durations:
+            if duration is None:
+                continue
             outside = [
                 event.event_id
                 for event in document.events
@@ -65,7 +70,7 @@ def load_video_annotations(
             ]
             if outside:
                 raise ValueError(
-                    f"annotation timestamps exceed duration for {video.id}: "
+                    f"annotation timestamps exceed {source} duration for {video.id}: "
                     + ", ".join(sorted(outside))
                 )
     return documents

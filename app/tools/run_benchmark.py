@@ -53,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cache directory; defaults to <output>/predictions.",
     )
     parser.add_argument("--baseline", help="Previous benchmark_report.json")
+    parser.add_argument(
+        "--allow-incomparable-baseline",
+        action="store_true",
+        help=(
+            "Developer-only override: show deltas for fingerprint-mismatched runs "
+            "with a prominent non-comparable warning."
+        ),
+    )
     parser.add_argument("--no-failure-artifacts", action="store_true")
     parser.add_argument(
         "--log-level",
@@ -142,7 +150,10 @@ def main(argv: list[str] | None = None) -> int:
         with Path(args.baseline).open("r", encoding="utf-8") as stream:
             baseline = json.load(stream)
         report["baseline_comparison"] = compare_with_baseline(
-            report, baseline, manifest.benchmark.baseline_tolerances
+            report,
+            baseline,
+            manifest.benchmark.baseline_tolerances,
+            allow_incomparable=args.allow_incomparable_baseline,
         )
     json_path, markdown_path = write_reports(report, output)
     metrics = report["overall_metrics"]

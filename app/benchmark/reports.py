@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
 import shutil
@@ -46,14 +47,49 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{overall['false_positives_per_video_hour']:.4f} |"
         ),
         "",
+        (
+            f"Rate denominator: {overall['duration_seconds_used']:.3f}s from "
+            f"`{overall['duration_source']}`; validation "
+            f"`{overall['duration_validation_status']}`; confidence "
+            f"`{overall['denominator_confidence']}`."
+        ),
+        "",
         "Headline annotation confidence: "
         + ", ".join(report["headline_annotation_confidences"]),
+        f"Prediction confidence threshold: {report['prediction_confidence_threshold']:.3f}",
         "",
-        "## Scenario metrics",
+        "## Prediction and ground-truth accounting",
         "",
-        "| Tag | TP | FP | FN | Precision | Recall | F1 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
     ]
+    for key, value in report["accounting"].items():
+        lines.append(f"- `{key}`: {value}")
+    lines.extend(
+        [
+            "",
+            "TP + FP + ignored predictions reconciles to every considered prediction.",
+            "",
+            "## Ignored-prediction diagnostics",
+            "",
+        ]
+    )
+    if report["ignored_predictions"]:
+        for item in report["ignored_predictions"]:
+            lines.append(
+                f"- `{item['video_id']}:{item['prediction_id']}` ignored by "
+                f"`{item['matched_ignore_annotation_id']}`: prediction coverage "
+                f"{item['prediction_coverage']:.4f}, IoU {item['temporal_iou']:.4f}"
+            )
+    else:
+        lines.append("No predictions were ignored.")
+    lines.extend(
+        [
+            "",
+            "## Scenario metrics",
+            "",
+            "| Tag | TP | FP | FN | Precision | Recall | F1 |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for tag, metrics in sorted(report["scenario_metrics"].items()):
         lines.append(
             f"| {tag} | {metrics['true_positives']} | {metrics['false_positives']} | "
@@ -158,9 +194,15 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "",
                 "## Baseline comparison",
                 "",
+                f"Comparison valid: `{baseline['comparison_valid']}`",
+                f"Override used: `{baseline['override_used']}`",
                 f"Regression detected: `{baseline['regression_detected']}`",
             ]
         )
+        if baseline.get("warning"):
+            lines.append(f"**{baseline['warning']}**")
+        if baseline.get("reason_codes"):
+            lines.append("Reason codes: " + ", ".join(baseline["reason_codes"]))
         for key, value in sorted(baseline["deltas"].items()):
             lines.append(f"- `{key}` delta: {value:.6f}")
         for key, value in sorted(baseline["policy_metric_deltas"].items()):
@@ -182,7 +224,33 @@ def compare_with_baseline(
     report: dict[str, Any],
     baseline: dict[str, Any],
     tolerances: BaselineTolerances,
+    *,
+    allow_incomparable: bool = False,
 ) -> dict[str, Any]:
+    current_reproducibility = report.get("reproducibility", {})
+    baseline_reproducibility = baseline.get("reproducibility", {})
+    current_dataset = current_reproducibility.get("dataset_fingerprint")
+    baseline_dataset = baseline_reproducibility.get("dataset_fingerprint")
+    current_evaluation = current_reproducibility.get("evaluation_fingerprint")
+    baseline_evaluation = baseline_reproducibility.get("evaluation_fingerprint")
+    reason_codes = []
+    if not current_dataset or current_dataset != baseline_dataset:
+        reason_codes.append("DATASET_FINGERPRINT_MISMATCH")
+    if not current_evaluation or current_evaluation != baseline_evaluation:
+        reason_codes.append("EVALUATION_CONFIG_MISMATCH")
+    comparison_valid = not reason_codes
+    if not comparison_valid and not allow_incomparable:
+        return {
+            "comparison_valid": False,
+            "override_used": False,
+            "warning": "Baseline is non-comparable; regression deltas are suppressed.",
+            "reason_codes": sorted(set(reason_codes)),
+            "deltas": {},
+            "policy_metric_deltas": {},
+            "regressions": {},
+            "regression_detected": None,
+            "tolerances": tolerances.model_dump(mode="json"),
+        }
     current_metrics = report["overall_metrics"]
     baseline_metrics = baseline["overall_metrics"]
     current_performance = report.get("performance_metrics", {})
@@ -222,6 +290,14 @@ def compare_with_baseline(
         if key.endswith("_rate")
     }
     return {
+        "comparison_valid": comparison_valid,
+        "override_used": bool(allow_incomparable and not comparison_valid),
+        "warning": (
+            "NON-COMPARABLE BASELINE OVERRIDE"
+            if allow_incomparable and not comparison_valid
+            else None
+        ),
+        "reason_codes": sorted(set(reason_codes)),
         "deltas": deltas,
         "policy_metric_deltas": policy_deltas,
         "regressions": regressions,
@@ -299,7 +375,7 @@ def _extract_failure_media(
     need_clip: bool,
 ) -> None:
     try:
-        import cv2
+        cv2: Any = importlib.import_module("cv2")
     except ImportError:  # pragma: no cover - runtime dependency in normal installs
         return
     capture = cv2.VideoCapture(str(source))

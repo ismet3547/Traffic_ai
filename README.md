@@ -265,14 +265,18 @@ benchmark manifest
 
 Start by copying [the benchmark manifest template](data/benchmark/manifests/benchmark_manifest.example.yaml) and [annotation example](data/benchmark/annotations/annotation_example.json). Put local videos under `data/benchmark/videos/` or reference an external path. Raw benchmark videos are ignored by Git by default; do not commit large or unlicensed footage.
 
-Each annotation document is schema `1.0`, belongs to one video and anonymous `annotator_id`, and contains explicit intervals. Supported behavior labels are:
+Each annotation document is schema `1.0`, belongs to one video and anonymous `annotator_id`, and contains explicit intervals. Every label has one canonical semantic role; an explicitly supplied `role` must match it:
 
-- `unnecessary_left_lane_occupation`: positive event for candidate precision/recall;
-- `legitimate_overtaking`, `congestion_left_lane_use`, `right_lane_unavailable`, and `temporary_left_lane_use`: suppression/control scenarios;
-- `insufficient_evidence`: an intentionally ambiguous interval;
-- `geometry_invalid`, `camera_motion`, and `lane_assignment_uncertain`: diagnostic conditions.
+- `unnecessary_left_lane_occupation`: `POSITIVE`, used for candidate precision/recall;
+- `legitimate_overtaking`, `congestion_left_lane_use`, `right_lane_unavailable`, `temporary_left_lane_use`, and `geometry_invalid`: `NEGATIVE_CONTROL`, used for separate suppression metrics and never as generic FP-ignore regions;
+- `insufficient_evidence`: `IGNORE_REGION`, the only default label allowed to remove a sufficiently covered prediction from FP accounting;
+- `camera_motion` and `lane_assignment_uncertain`: `DIAGNOSTIC`, contextual evidence that does not change headline accounting by itself.
 
-Confidence is `high`, `medium`, or `low`. Headline metrics default to high-confidence annotations. Excluded-confidence intervals act as ignore regions so an ambiguous interval is not silently converted into absolute truth; exact high/medium/low strata are also reported. A manifest may add independent annotation documents through `additional_annotations`; pairwise label agreement, temporal agreement, unmatched counts, mean temporal IoU, and matched-label Cohen's kappa are reported with an explicit caveat.
+Confidence is `high`, `medium`, or `low`. Headline positive and control metrics default to configured high-confidence annotations; exact high/medium/low positive strata are also reported. Confidence and semantic role are independent: a low-confidence positive or control does not automatically become an ignore region. Non-headline positive GT is reported as ignored ground truth, while a prediction overlapping it remains accountable under the conservative headline policy. A manifest may add independent annotation documents through `additional_annotations`; pairwise label agreement, temporal agreement, unmatched counts, mean temporal IoU, and matched-label Cohen's kappa are reported with an explicit caveat.
+
+Ignore-region removal is label-aware and thresholded. `prediction_coverage` is the intersection duration divided by prediction duration and must meet `ignored_regions.minimum_prediction_coverage`; optional temporal-IoU minimums can strengthen that gate. A tiny overlap with an ignored annotation is not sufficient to remove a prediction from false-positive accounting. Every ignored prediction remains in JSON diagnostics with its prediction ID, matched ignore annotation, coverage, IoU, and reason. Negative controls never both hide an FP and count a suppression failure.
+
+`minimum_prediction_confidence` filters only predictions below the configured threshold. Filtered IDs, confidence values, and the threshold remain auditable. Reports reconcile all input records as excluded non-review records, confidence-filtered predictions, or considered predictions; considered predictions then reconcile exactly to TP, FP, or ignored. Positive GT similarly reconciles to matched, FN, or non-headline ignored GT. Invariant violations fail the benchmark.
 
 Manifest tags such as `daylight`, `night`, `rain`, `free_flow`, `dense_traffic`, `fixed_camera`, `camera_motion`, `curved_road`, `heavy_trucks`, `occlusion`, and `low_resolution` produce scenario-specific metrics. Every entry also has a dataset split:
 
@@ -304,7 +308,7 @@ python -m app.tools.run_benchmark `
   --split validation
 ```
 
-The CI-safe synthetic replay uses no video and downloads no model weights:
+The CI-safe synthetic integrity test uses no video and downloads no model weights:
 
 ```powershell
 python -m app.tools.run_benchmark `
@@ -342,21 +346,23 @@ python -m app.tools.inspect_failures `
 
 ### Matching and metric definitions
 
-Temporal IoU is interval intersection duration divided by interval union duration. The implementation forms every eligible pair, sorts by descending IoU followed by absolute start error, absolute duration error and stable event IDs, then greedily accepts pairs while enforcing one-to-one use. A pair must meet the inclusive `minimum_temporal_iou` and optional inclusive `start_tolerance_seconds`; track association is optional because runtime and annotation track IDs are often unrelated.
+Temporal IoU is interval intersection duration divided by interval union duration. Invalid pairs are omitted from the bipartite graph unless they meet the inclusive `minimum_temporal_iou`, optional inclusive `start_tolerance_seconds`, and optional track constraint. A deterministic min-cost maximum-flow assignment first maximizes the number of valid one-to-one matches and then maximizes total temporal IoU. Stable GT/prediction ID ordering resolves equal-quality solutions; the earlier greedy matcher was removed because it could produce avoidable FP+FN pairs.
+
+Negative controls use a separate criterion: both `control_events.minimum_prediction_coverage` and `control_events.minimum_temporal_iou` must pass. A one-frame overlap therefore does not automatically count as a full suppression failure.
 
 - Precision = `TP / (TP + FP)`.
 - Recall = `TP / (TP + FN)`.
 - F1 = `2 * precision * recall / (precision + recall)`.
 - A zero denominator produces `0.0`, never NaN.
-- FP/hour and FN/hour divide counts by the evaluated video duration in hours.
+- FP/hour and FN/hour divide counts by a validated duration in hours. Available manifest, annotation, prediction-cache, and actual OpenCV video-metadata durations are compared using absolute and relative tolerances; gross disagreement fails before rates are calculated. Actual video metadata is preferred when available. Cache-only single-source rates are labeled `single_source_unverified` with low denominator confidence; configurable acceptance can require multiple consistent sources.
 - Start-time and duration errors are prediction values minus matched ground-truth values; absolute summaries are also included.
 - Real-time factor is video duration divided by measured end-to-end processing time; values greater than 1 are faster than real time.
 
-Reports include overall, per-video, per-tag, confidence-stratified and policy-specific suppression metrics, timing errors, performance/hardware metadata when inference was measured, annotation agreement, acceptance criteria if configured, and a suspected failure breakdown. `benchmark_report.json` is machine-readable; `benchmark_report.md` is the human review summary. `resolved_config.yaml`, configuration/annotation/prediction-cache SHA-256 hashes, Git commit and dirty-worktree state when available, annotation/benchmark schema versions, policy version, detector identifier, and tracker identifier make runs reproducible. Git/version failures are recorded as null and warned, never fabricated.
+Reports include overall, per-video, per-tag, confidence-stratified and policy-specific suppression metrics, full accounting, duration evidence/status, timing errors, performance/hardware metadata when inference was measured, annotation agreement, acceptance criteria if configured, and a suspected failure breakdown. `benchmark_report.json` is machine-readable; `benchmark_report.md` is the human review summary. `resolved_config.yaml`, separate production-config/dataset/evaluation fingerprints, annotation/prediction-cache SHA-256 hashes, Git commit and dirty-worktree state when available, annotation/benchmark schema versions, policy version, detector identifier, and tracker identifier make runs reproducible. Git/version failures are recorded as null and warned, never fabricated.
 
 When enabled, FP/FN bundles are written under `failures/<video_id>/<failure_id>/` with diagnostic metadata and copied or extracted representative media. Categories such as `OVERTAKING_LOGIC_ERROR` and `GEOMETRY_INTEGRITY_ERROR` are heuristic suspects, not asserted root causes. Current production output has rich event-level context but no machine-readable per-frame telemetry stream, so detection misses and tracker ID switches cannot always be diagnosed automatically.
 
-Pass `--baseline previous/benchmark_report.json` to report precision, recall, F1, FP/hour and processing-FPS deltas. Direction-aware tolerances avoid treating floating-point noise as a regression. Optional acceptance criteria report PASS/FAIL only when explicitly configured; the repository invents no government or production-readiness threshold.
+Pass `--baseline previous/benchmark_report.json` to compare precision, recall, F1, FP/hour and processing FPS. Regression deltas are valid only when the evaluated dataset and evaluation protocol are comparable. Dataset fingerprints cover ordered video IDs/splits plus annotation hashes/schema versions; evaluation fingerprints cover matching, ignore/control rules, duration policy, confidence threshold, headline confidence, roles, and label set. Production configuration has a separate hash, so policy changes can be compared while the dataset/protocol remains fixed. Fingerprint mismatch suppresses ordinary deltas by default. The developer-only `--allow-incomparable-baseline` flag displays them under a prominent `NON-COMPARABLE BASELINE OVERRIDE` warning. Direction-aware tolerances avoid treating floating-point noise as regression. Optional acceptance criteria report PASS/FAIL only when explicitly configured; the repository invents no government or production-readiness threshold.
 
 No real-world accuracy claim should be made until a sufficiently diverse, independently annotated test set has been evaluated.
 
@@ -368,10 +374,16 @@ Tests use synthetic geometry, fake detections/tracks, and fake video writers; th
 python -m pytest -q
 python -m ruff check app tests
 python -m ruff format --check app tests
+python -m mypy
+python -m pyright
 python -m compileall -q app tests
 ```
 
-Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, synthetic pipeline flows, annotation validation, deterministic matching, exact metrics, failure diagnostics, reports, baseline comparison, annotator agreement, and cache-only benchmark replay.
+The committed mypy and pyright configurations cover the benchmark package and its
+CLI tools introduced in Phase 4. This keeps benchmark-integrity checks reproducible
+without claiming that unrelated legacy production modules are already fully typed.
+
+Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, synthetic pipeline flows, annotation roles, adversarial ignore overlaps, optimal matching, duration evidence mismatch, accounting invariants, comparable/non-comparable baselines, failure diagnostics, reports, annotator agreement, and cache-only benchmark replay.
 
 ## Known limitations
 

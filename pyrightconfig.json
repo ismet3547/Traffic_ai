@@ -1,0 +1,12 @@
+{
+  "include": [
+    "app/benchmark",
+    "app/tools/run_benchmark.py",
+    "app/tools/validate_annotations.py",
+    "app/tools/extract_annotation_frames.py",
+    "app/tools/inspect_failures.py"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false
+}

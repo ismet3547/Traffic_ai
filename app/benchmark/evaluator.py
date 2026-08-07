@@ -1,4 +1,4 @@
-"""Orchestrate cached-prediction evaluation without invoking inference."""
+"""Orchestrate conservative cached-prediction evaluation without inference."""
 
 from __future__ import annotations
 
@@ -12,17 +12,25 @@ from app.benchmark.diagnostics import (
     diagnose_false_negative,
     diagnose_false_positive,
 )
+from app.benchmark.duration import resolve_video_duration
 from app.benchmark.metrics import (
     EventEvaluation,
+    combine_accounting,
     combine_evaluations,
     evaluate_events,
     policy_specific_metrics,
 )
 from app.benchmark.models import (
+    ANNOTATION_ROLE_BY_LABEL,
     AnnotationConfidence,
+    AnnotationRole,
     BenchmarkManifest,
+    DurationValidationResult,
+    FailureRecord,
     ManifestVideo,
     PredictionDocument,
+    RuntimePerformance,
+    annotation_role,
 )
 
 
@@ -42,8 +50,11 @@ def evaluate_benchmark(
     evaluations: dict[str, EventEvaluation] = {}
     annotations_by_video: dict[str, list[Any]] = {}
     documents_by_video: dict[str, list[Any]] = {}
+    durations_by_video: dict[str, DurationValidationResult] = {}
     per_video: dict[str, Any] = {}
-    failures = []
+    failures: list[FailureRecord] = []
+    ignored_predictions: list[dict[str, Any]] = []
+    ignored_ground_truth: list[dict[str, Any]] = []
     policy_counts: Counter[str] = Counter()
     agreement = []
 
@@ -55,52 +66,123 @@ def evaluate_benchmark(
         annotations = primary.events
         documents_by_video[video.id] = documents
         annotations_by_video[video.id] = annotations
-        duration = _video_duration(
-            video, primary.video_duration_seconds, predictions[video.id]
+        duration = resolve_video_duration(
+            manifest_path,
+            video,
+            primary,
+            predictions[video.id],
+            manifest.benchmark.duration_validation,
         )
-        selected = [
-            event for event in annotations if event.confidence in headline_confidences
-        ]
-        ignored = [
+        durations_by_video[video.id] = duration
+        positive_events = [
             event
             for event in annotations
+            if annotation_role(event.label) == AnnotationRole.POSITIVE
+        ]
+        selected_positive = [
+            event
+            for event in positive_events
+            if event.confidence in headline_confidences
+        ]
+        non_headline_positive = [
+            event
+            for event in positive_events
             if event.confidence not in headline_confidences
+        ]
+        semantic_ignore_regions = [
+            event
+            for event in annotations
+            if annotation_role(event.label) == AnnotationRole.IGNORE_REGION
+        ]
+        selected_controls = [
+            event
+            for event in annotations
+            if annotation_role(event.label) == AnnotationRole.NEGATIVE_CONTROL
+            and event.confidence in headline_confidences
         ]
         evaluation = evaluate_events(
             video.id,
-            selected,
+            selected_positive,
             predictions[video.id].predictions,
             manifest.benchmark.matching,
             duration,
-            ignored_annotations=ignored,
+            ignored_annotations=semantic_ignore_regions,
+            ignored_ground_truth=non_headline_positive,
+            ignored_region_config=manifest.benchmark.ignored_regions,
+            minimum_prediction_confidence=(
+                manifest.benchmark.minimum_prediction_confidence
+            ),
         )
         evaluations[video.id] = evaluation
         policy = policy_specific_metrics(
-            selected,
-            predictions[video.id].predictions,
-            manifest.benchmark.matching,
+            selected_controls,
+            list(evaluation.considered_predictions),
+            manifest.benchmark.control_events,
         )
         _add_policy_counts(policy_counts, policy)
         per_video[video.id] = {
             "tags": sorted(video.tags),
             "split": video.split.value,
-            "duration_seconds": duration,
+            "duration_seconds": duration.duration_seconds_used,
+            "duration_validation": duration.model_dump(mode="json"),
             "metrics": evaluation.metrics.model_dump(mode="json"),
+            "accounting": evaluation.accounting.model_dump(mode="json"),
             "matches": [item.model_dump(mode="json") for item in evaluation.matches],
-            "ignored_prediction_ids": list(evaluation.ignored_prediction_ids),
+            "ignored_predictions": [
+                item.model_dump(mode="json") for item in evaluation.ignored_predictions
+            ],
+            "filtered_predictions": [
+                item.model_dump(mode="json") for item in evaluation.filtered_predictions
+            ],
+            "ignored_ground_truth_events": [
+                {
+                    "event_id": event.event_id,
+                    "label": event.label.value,
+                    "confidence": event.confidence.value,
+                    "reason": "positive annotation confidence excluded from headline",
+                }
+                for event in evaluation.ignored_ground_truth
+            ],
+            "matching_diagnostics": evaluation.matching_diagnostics,
             "policy_metrics": policy,
             "annotation_event_counts": _annotation_counts(annotations),
         }
-        fp_failures = [
-            diagnose_false_positive(prediction, annotations, sequence)
+        ignored_predictions.extend(
+            {
+                "video_id": video.id,
+                **item.model_dump(mode="json"),
+            }
+            for item in evaluation.ignored_predictions
+        )
+        ignored_ground_truth.extend(
+            {
+                "video_id": video.id,
+                "event_id": event.event_id,
+                "label": event.label.value,
+                "confidence": event.confidence.value,
+                "reason": "positive annotation confidence excluded from headline",
+            }
+            for event in evaluation.ignored_ground_truth
+        )
+        failures.extend(
+            diagnose_false_positive(
+                prediction,
+                annotations,
+                sequence,
+                evaluation.matching_diagnostics.get(prediction.event_id),
+            )
             for sequence, prediction in enumerate(evaluation.false_positives, start=1)
-        ]
-        fn_failures = [
-            diagnose_false_negative(truth, annotations, video.id, sequence)
+        )
+        failures.extend(
+            diagnose_false_negative(
+                truth,
+                annotations,
+                video.id,
+                sequence,
+                evaluation.matching_diagnostics.get(f"ground_truth:{truth.event_id}"),
+            )
             for sequence, truth in enumerate(evaluation.false_negatives, start=1)
-        ]
-        failures.extend(fp_failures)
-        failures.extend(fn_failures)
+        )
         if len(documents) >= 2:
             for first_index in range(len(documents) - 1):
                 for second_index in range(first_index + 1, len(documents)):
@@ -113,44 +195,68 @@ def evaluate_benchmark(
                     )
 
     overall = combine_evaluations(list(evaluations.values()))
+    overall_accounting = combine_accounting(list(evaluations.values()))
     scenario_metrics = _scenario_metrics(selected_videos, evaluations)
     confidence_metrics = _confidence_metrics(
         selected_videos,
         annotations_by_video,
         predictions,
         manifest,
-        documents_by_video,
+        durations_by_video,
     )
     performance = _performance_summary(selected_videos, predictions)
     policy_metrics = _finish_policy_metrics(policy_counts)
     failure_breakdown = dict(
         sorted(Counter(item.suspected_failure_category for item in failures).items())
     )
-    acceptance = _acceptance(overall.model_dump(mode="json"), manifest)
+    acceptance = _acceptance(
+        overall.model_dump(mode="json"), manifest, durations_by_video
+    )
     return {
         "benchmark_schema_version": "1.0",
         "report_title": (
-            "SYNTHETIC EXAMPLE - NOT REAL-WORLD PERFORMANCE"
+            "SYNTHETIC INTEGRITY TEST - NOT REAL-WORLD PERFORMANCE"
             if manifest.synthetic
             else manifest.name
         ),
         "synthetic": manifest.synthetic,
         "accuracy_claim": (
-            "Synthetic fixture validation only; this is not measured real-world accuracy."
+            "Synthetic integrity fixture only; this is not measured real-world accuracy."
             if manifest.synthetic
             else "Metrics describe only the annotated videos in this manifest."
         ),
         "headline_annotation_confidences": sorted(
             confidence.value for confidence in headline_confidences
         ),
+        "prediction_confidence_threshold": (
+            manifest.benchmark.minimum_prediction_confidence
+        ),
+        "annotation_roles": {
+            label.value: role.value
+            for label, role in sorted(
+                ANNOTATION_ROLE_BY_LABEL.items(), key=lambda item: item[0].value
+            )
+        },
         "metric_definitions": {
             "precision": "TP / (TP + FP); zero when the denominator is zero",
             "recall": "TP / (TP + FN); zero when the denominator is zero",
             "f1": "2 * precision * recall / (precision + recall); zero when both are zero",
-            "temporal_iou": "intersection duration / union duration",
+            "temporal_iou": "intersection duration / interval union duration",
+            "prediction_coverage": "intersection duration / prediction duration",
+            "event_matching": "maximum valid cardinality, then maximum total temporal IoU",
+            "control_overlap": "both configured prediction coverage and temporal IoU must pass",
             "real_time_factor": "video duration / processing time; values above 1 are faster than real time",
         },
         "overall_metrics": overall.model_dump(mode="json"),
+        "accounting": overall_accounting.model_dump(mode="json"),
+        "ignored_predictions": sorted(
+            ignored_predictions,
+            key=lambda item: (item["video_id"], item["prediction_id"]),
+        ),
+        "ignored_ground_truth_events": sorted(
+            ignored_ground_truth,
+            key=lambda item: (item["video_id"], item["event_id"]),
+        ),
         "per_video_metrics": per_video,
         "scenario_metrics": scenario_metrics,
         "confidence_stratified_metrics": confidence_metrics,
@@ -177,35 +283,14 @@ def evaluate_benchmark(
     }
 
 
-def _video_duration(
-    video: ManifestVideo,
-    annotation_duration: float | None,
-    prediction: PredictionDocument,
-) -> float:
-    values = (
-        video.duration_seconds,
-        annotation_duration,
-        (
-            prediction.performance.video_duration_seconds
-            if prediction.performance is not None
-            else None
-        ),
-    )
-    for value in values:
-        if value is not None and value > 0:
-            return value
-    raise ValueError(
-        f"video {video.id!r} needs duration_seconds in the manifest, annotation, "
-        "or prediction performance metadata"
-    )
-
-
 def _annotation_counts(annotations: list[Any]) -> dict[str, dict[str, int]]:
     by_confidence = Counter(event.confidence.value for event in annotations)
     by_label = Counter(event.label.value for event in annotations)
+    by_role = Counter(annotation_role(event.label).value for event in annotations)
     return {
         "by_confidence": dict(sorted(by_confidence.items())),
         "by_label": dict(sorted(by_label.items())),
+        "by_role": dict(sorted(by_role.items())),
     }
 
 
@@ -227,35 +312,41 @@ def _confidence_metrics(
     annotations: dict[str, list[Any]],
     predictions: dict[str, PredictionDocument],
     manifest: BenchmarkManifest,
-    documents: dict[str, list[Any]],
+    durations: dict[str, DurationValidationResult],
 ) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for confidence in AnnotationConfidence:
         evaluations = []
         for video in videos:
+            positive_events = [
+                event
+                for event in annotations[video.id]
+                if annotation_role(event.label) == AnnotationRole.POSITIVE
+            ]
             selected = [
+                event for event in positive_events if event.confidence == confidence
+            ]
+            non_selected = [
+                event for event in positive_events if event.confidence != confidence
+            ]
+            semantic_ignore = [
                 event
                 for event in annotations[video.id]
-                if event.confidence == confidence
+                if annotation_role(event.label) == AnnotationRole.IGNORE_REGION
             ]
-            ignored = [
-                event
-                for event in annotations[video.id]
-                if event.confidence != confidence
-            ]
-            duration = _video_duration(
-                video,
-                documents[video.id][0].video_duration_seconds,
-                predictions[video.id],
-            )
             evaluations.append(
                 evaluate_events(
                     video.id,
                     selected,
                     predictions[video.id].predictions,
                     manifest.benchmark.matching,
-                    duration,
-                    ignored_annotations=ignored,
+                    durations[video.id],
+                    ignored_annotations=semantic_ignore,
+                    ignored_ground_truth=non_selected,
+                    ignored_region_config=manifest.benchmark.ignored_regions,
+                    minimum_prediction_confidence=(
+                        manifest.benchmark.minimum_prediction_confidence
+                    ),
                 )
             )
         output[confidence.value] = combine_evaluations(evaluations).model_dump(
@@ -295,11 +386,13 @@ def _finish_policy_metrics(counts: Counter[str]) -> dict[str, float | int]:
 def _performance_summary(
     videos: list[ManifestVideo], predictions: dict[str, PredictionDocument]
 ) -> dict[str, Any]:
-    records = [
-        predictions[video.id].performance
-        for video in videos
-        if predictions[video.id].performance is not None
-    ]
+    records: list[RuntimePerformance] = []
+    per_video: dict[str, Any] = {}
+    for video in videos:
+        performance = predictions[video.id].performance
+        if performance is not None:
+            records.append(performance)
+            per_video[video.id] = performance.model_dump(mode="json")
     if not records:
         return {
             "available": False,
@@ -320,15 +413,15 @@ def _performance_summary(
         "average_frame_processing_time_ms": (
             total_time * 1000.0 / total_frames if total_frames else 0.0
         ),
-        "per_video": {
-            video.id: predictions[video.id].performance.model_dump(mode="json")
-            for video in videos
-            if predictions[video.id].performance is not None
-        },
+        "per_video": per_video,
     }
 
 
-def _acceptance(metrics: dict[str, Any], manifest: BenchmarkManifest) -> dict[str, Any]:
+def _acceptance(
+    metrics: dict[str, Any],
+    manifest: BenchmarkManifest,
+    durations: dict[str, DurationValidationResult],
+) -> dict[str, Any]:
     criteria = manifest.benchmark.acceptance
     checks = []
     if criteria.minimum_precision is not None:
@@ -360,6 +453,25 @@ def _acceptance(metrics: dict[str, Any], manifest: BenchmarkManifest) -> dict[st
                 "threshold": criteria.maximum_false_positives_per_hour,
                 "actual": actual,
                 "passed": actual <= criteria.maximum_false_positives_per_hour,
+            }
+        )
+    if (
+        checks
+        and manifest.benchmark.duration_validation.require_multiple_sources_for_acceptance
+    ):
+        unverified = sorted(
+            video_id
+            for video_id, duration in durations.items()
+            if duration.duration_validation_status == "single_source_unverified"
+        )
+        checks.append(
+            {
+                "metric": "duration_denominator_validation",
+                "operator": "multiple_consistent_sources_or_video_metadata",
+                "threshold": 0,
+                "actual": len(unverified),
+                "passed": not unverified,
+                "unverified_video_ids": unverified,
             }
         )
     return {

@@ -1,16 +1,19 @@
-# SYNTHETIC EXAMPLE - NOT REAL-WORLD PERFORMANCE
+# SYNTHETIC INTEGRITY TEST - NOT REAL-WORLD PERFORMANCE
 
-This example is generated from the committed fake annotations and fake prediction cache. It validates benchmark arithmetic only; no traffic video, detector, tracker, or real driving behavior was evaluated.
+This example comes only from committed fake annotations and fake predictions. It validates benchmark integrity and arithmetic; no traffic video, detector, tracker, or real driving behavior was evaluated.
 
-| TP | FP | FN | Precision | Recall | F1 | FP/video hour |
-|---:|---:|---:|---:|---:|---:|---:|
-| 2 | 1 | 0 | 0.6667 | 1.0000 | 0.8000 | 30.0000 |
+| TP | FP | FN | Ignored | Confidence-filtered | Precision | Recall | F1 | FP/video hour |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 4 | 1 | 1 | 1 | 0.3333 | 0.6667 | 0.4444 | 72.0000 |
 
-Fixture definition:
+Exact accounting over the 200-second fixture:
 
-- Two synthetic `unnecessary_left_lane_occupation` intervals are matched.
-- One synthetic candidate overlaps a `legitimate_overtaking` control interval and is counted as an FP.
-- The fake video duration is 120 seconds, so one FP corresponds to 30 FP/video hour.
-- The suspected failure hint is `OVERTAKING_LOGIC_ERROR`; it is a heuristic label, not a proven cause.
+- Three positive GT events produce two matches and one FN.
+- Eight prediction records produce one confidence-filtered prediction and seven considered predictions.
+- The seven considered predictions reconcile to two TP, four FP, and one ignored prediction.
+- The four FPs are a duplicate prediction, a genuine unrelated prediction, a tiny-overlap-with-ignore prediction, and a candidate during a legitimate-overtaking control.
+- The mostly-contained ignore prediction has 100% prediction coverage and is retained in ignored-prediction diagnostics.
+- One of two overtaking controls is a suppression failure; the congestion control is not.
+- The manifest and annotation durations agree at 200 seconds, producing `consistent_multiple_sources` and medium denominator confidence.
 
-Recreate the complete JSON and Markdown reports with the synthetic replay command in the root README.
+Recreate the full deterministic JSON and Markdown output with the synthetic replay command in the root README.

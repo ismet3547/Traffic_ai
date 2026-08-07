@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-ANNOTATION_SCHEMA_VERSION = "1.0"
-BENCHMARK_SCHEMA_VERSION = "1.0"
-PREDICTION_SCHEMA_VERSION = "1.0"
+ANNOTATION_SCHEMA_VERSION: Final = "1.0"
+BENCHMARK_SCHEMA_VERSION: Final = "1.0"
+PREDICTION_SCHEMA_VERSION: Final = "1.0"
 
 
 class StrictModel(BaseModel):
@@ -34,6 +34,30 @@ class AnnotationConfidence(str, Enum):
     LOW = "low"
 
 
+class AnnotationRole(str, Enum):
+    POSITIVE = "positive"
+    NEGATIVE_CONTROL = "negative_control"
+    IGNORE_REGION = "ignore_region"
+    DIAGNOSTIC = "diagnostic"
+
+
+ANNOTATION_ROLE_BY_LABEL: dict[AnnotationLabel, AnnotationRole] = {
+    AnnotationLabel.UNNECESSARY_LEFT_LANE_OCCUPATION: AnnotationRole.POSITIVE,
+    AnnotationLabel.LEGITIMATE_OVERTAKING: AnnotationRole.NEGATIVE_CONTROL,
+    AnnotationLabel.CONGESTION_LEFT_LANE_USE: AnnotationRole.NEGATIVE_CONTROL,
+    AnnotationLabel.RIGHT_LANE_UNAVAILABLE: AnnotationRole.NEGATIVE_CONTROL,
+    AnnotationLabel.TEMPORARY_LEFT_LANE_USE: AnnotationRole.NEGATIVE_CONTROL,
+    AnnotationLabel.INSUFFICIENT_EVIDENCE: AnnotationRole.IGNORE_REGION,
+    AnnotationLabel.GEOMETRY_INVALID: AnnotationRole.NEGATIVE_CONTROL,
+    AnnotationLabel.CAMERA_MOTION: AnnotationRole.DIAGNOSTIC,
+    AnnotationLabel.LANE_ASSIGNMENT_UNCERTAIN: AnnotationRole.DIAGNOSTIC,
+}
+
+
+def annotation_role(label: AnnotationLabel) -> AnnotationRole:
+    return ANNOTATION_ROLE_BY_LABEL[label]
+
+
 class DatasetSplit(str, Enum):
     DEVELOPMENT = "development"
     VALIDATION = "validation"
@@ -46,6 +70,7 @@ class GroundTruthEvent(StrictModel):
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
     label: AnnotationLabel
+    role: AnnotationRole | None = None
     confidence: AnnotationConfidence = AnnotationConfidence.HIGH
     notes: str | None = None
 
@@ -55,6 +80,13 @@ class GroundTruthEvent(StrictModel):
             raise ValueError(
                 "annotation end_seconds must be greater than start_seconds"
             )
+        expected_role = annotation_role(self.label)
+        if self.role is not None and self.role != expected_role:
+            raise ValueError(
+                f"annotation role {self.role.value!r} is incompatible with label "
+                f"{self.label.value!r}; expected {expected_role.value!r}"
+            )
+        self.role = expected_role
         return self
 
 
@@ -92,6 +124,42 @@ class MatchingConfig(StrictModel):
     require_track_association_if_available: bool = False
 
 
+class IgnoredRegionConfig(StrictModel):
+    enabled: bool = True
+    minimum_prediction_coverage: float = Field(default=0.50, gt=0, le=1)
+    minimum_temporal_iou: float = Field(default=0.0, ge=0, le=1)
+    allowed_labels: list[AnnotationLabel] = Field(
+        default_factory=lambda: [AnnotationLabel.INSUFFICIENT_EVIDENCE]
+    )
+
+    @model_validator(mode="after")
+    def validate_labels(self) -> IgnoredRegionConfig:
+        if len(self.allowed_labels) != len(set(self.allowed_labels)):
+            raise ValueError("ignored-region labels must not contain duplicates")
+        invalid = [
+            label.value
+            for label in self.allowed_labels
+            if annotation_role(label) != AnnotationRole.IGNORE_REGION
+        ]
+        if invalid:
+            raise ValueError(
+                "ignored-region labels must have canonical IGNORE_REGION role: "
+                + ", ".join(sorted(invalid))
+            )
+        return self
+
+
+class ControlEventConfig(StrictModel):
+    minimum_prediction_coverage: float = Field(default=0.50, gt=0, le=1)
+    minimum_temporal_iou: float = Field(default=0.20, gt=0, le=1)
+
+
+class DurationValidationConfig(StrictModel):
+    absolute_tolerance_seconds: float = Field(default=1.0, ge=0)
+    relative_tolerance: float = Field(default=0.01, ge=0, le=1)
+    require_multiple_sources_for_acceptance: bool = True
+
+
 class AcceptanceCriteria(StrictModel):
     minimum_precision: float | None = Field(default=None, ge=0, le=1)
     minimum_recall: float | None = Field(default=None, ge=0, le=1)
@@ -108,6 +176,12 @@ class BaselineTolerances(StrictModel):
 
 class BenchmarkSettings(StrictModel):
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
+    ignored_regions: IgnoredRegionConfig = Field(default_factory=IgnoredRegionConfig)
+    control_events: ControlEventConfig = Field(default_factory=ControlEventConfig)
+    duration_validation: DurationValidationConfig = Field(
+        default_factory=DurationValidationConfig
+    )
+    minimum_prediction_confidence: float = Field(default=0.0, ge=0, le=1)
     headline_confidences: list[AnnotationConfidence] = Field(
         default_factory=lambda: [AnnotationConfidence.HIGH]
     )
@@ -256,6 +330,76 @@ class EventMatch(StrictModel):
     duration_error_seconds: float
 
 
+class DurationEvidence(StrictModel):
+    source: Literal["manifest", "annotation", "video_metadata", "prediction_cache"]
+    seconds: float = Field(gt=0)
+    confidence: Literal["high", "medium", "low"]
+
+
+class DurationValidationResult(StrictModel):
+    duration_seconds_used: float = Field(gt=0)
+    duration_source: str
+    duration_validation_status: Literal[
+        "verified_video_metadata",
+        "consistent_multiple_sources",
+        "single_source_unverified",
+        "aggregate",
+    ]
+    denominator_confidence: Literal["high", "medium", "low"]
+    evidence: list[DurationEvidence]
+
+
+class IgnoredPredictionDiagnostic(StrictModel):
+    prediction_id: str
+    matched_ignore_annotation_id: str
+    prediction_coverage: float = Field(ge=0, le=1)
+    temporal_iou: float = Field(ge=0, le=1)
+    ignore_reason: str
+
+
+class FilteredPredictionDiagnostic(StrictModel):
+    prediction_id: str
+    confidence: float = Field(ge=0, le=1)
+    threshold: float = Field(ge=0, le=1)
+    reason: str = "below_minimum_prediction_confidence"
+
+
+class EvaluationAccounting(StrictModel):
+    total_prediction_records: int = Field(ge=0)
+    excluded_non_review_predictions: int = Field(ge=0)
+    total_predictions_considered: int = Field(ge=0)
+    matched_predictions: int = Field(ge=0)
+    false_positive_predictions: int = Field(ge=0)
+    ignored_predictions: int = Field(ge=0)
+    filtered_low_confidence_predictions: int = Field(ge=0)
+    total_positive_gt: int = Field(ge=0)
+    matched_positive_gt: int = Field(ge=0)
+    false_negative_gt: int = Field(ge=0)
+    ignored_ground_truth_events: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_accounting(self) -> EvaluationAccounting:
+        if self.total_predictions_considered != (
+            self.matched_predictions
+            + self.false_positive_predictions
+            + self.ignored_predictions
+        ):
+            raise ValueError("considered prediction accounting does not reconcile")
+        if self.total_prediction_records != (
+            self.excluded_non_review_predictions
+            + self.filtered_low_confidence_predictions
+            + self.total_predictions_considered
+        ):
+            raise ValueError("total prediction accounting does not reconcile")
+        if self.total_positive_gt != (
+            self.matched_positive_gt
+            + self.false_negative_gt
+            + self.ignored_ground_truth_events
+        ):
+            raise ValueError("positive ground-truth accounting does not reconcile")
+        return self
+
+
 class MetricSummary(StrictModel):
     true_positives: int = Field(ge=0)
     false_positives: int = Field(ge=0)
@@ -272,6 +416,10 @@ class MetricSummary(StrictModel):
     mean_absolute_start_time_error_seconds: float | None = Field(default=None, ge=0)
     mean_duration_error_seconds: float | None = None
     mean_absolute_duration_error_seconds: float | None = Field(default=None, ge=0)
+    duration_seconds_used: float = Field(default=0, ge=0)
+    duration_source: str = "unavailable"
+    duration_validation_status: str = "unavailable"
+    denominator_confidence: str = "unavailable"
 
 
 class FailureRecord(StrictModel):
@@ -284,6 +432,9 @@ class FailureRecord(StrictModel):
     ground_truth: dict[str, Any] | None = None
     prediction: dict[str, Any] | None = None
     artifact_directory: str | None = None
+    best_candidate_iou: float | None = Field(default=None, ge=0, le=1)
+    best_candidate_prediction_coverage: float | None = Field(default=None, ge=0, le=1)
+    matching_rejection_reason: str | None = None
 
 
 class AnnotationAgreement(StrictModel):

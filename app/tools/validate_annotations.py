@@ -12,7 +12,16 @@ from app.benchmark.annotations import (
     resolve_manifest_path,
     validate_manifest_references,
 )
-from app.benchmark.runner import probe_video
+from app.benchmark.duration import (
+    probe_video_duration,
+    resolve_video_duration,
+    validate_duration_evidence,
+)
+from app.benchmark.models import (
+    DurationEvidence,
+    DurationValidationConfig,
+    PredictionDocument,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,37 +65,65 @@ def main(argv: list[str] | None = None) -> int:
                     video_path = resolve_manifest_path(path, video.path)
                     if not video_path.is_file():
                         continue
-                    _, actual_duration = probe_video(video_path)
                     for document in load_video_annotations(path, video):
+                        duration_validation = resolve_video_duration(
+                            path,
+                            video,
+                            document,
+                            PredictionDocument(video_id=video.id),
+                            manifest.benchmark.duration_validation,
+                        )
                         outside = [
                             event.event_id
                             for event in document.events
-                            if event.end_seconds > actual_duration + 1e-9
+                            if event.end_seconds
+                            > duration_validation.duration_seconds_used + 1e-9
                         ]
                         if outside:
                             errors.append(
                                 f"{video.id}: timestamps exceed actual video duration "
-                                f"{actual_duration:.3f}s: " + ", ".join(sorted(outside))
+                                f"{duration_validation.duration_seconds_used:.3f}s: "
+                                + ", ".join(sorted(outside))
                             )
             checked = sum(video.enabled for video in manifest.videos)
         except (FileNotFoundError, RuntimeError, ValueError) as exc:
             errors.append(str(exc))
     else:
-        duration = None
+        video_duration_seconds: float | None = None
         if args.video:
             try:
-                _, duration = probe_video(args.video)
-            except (FileNotFoundError, RuntimeError) as exc:
+                video_duration_seconds = probe_video_duration(args.video)
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
                 errors.append(str(exc))
         for value in args.annotation:
             try:
                 document = load_annotation(value)
                 checked += 1
-                if duration is not None:
+                if video_duration_seconds is not None:
+                    evidence = [
+                        DurationEvidence(
+                            source="video_metadata",
+                            seconds=video_duration_seconds,
+                            confidence="high",
+                        )
+                    ]
+                    if document.video_duration_seconds is not None:
+                        evidence.append(
+                            DurationEvidence(
+                                source="annotation",
+                                seconds=document.video_duration_seconds,
+                                confidence="medium",
+                            )
+                        )
+                    validate_duration_evidence(
+                        document.video_id,
+                        evidence,
+                        DurationValidationConfig(),
+                    )
                     outside = [
                         event.event_id
                         for event in document.events
-                        if event.end_seconds > duration + 1e-9
+                        if event.end_seconds > video_duration_seconds + 1e-9
                     ]
                     if outside:
                         errors.append(

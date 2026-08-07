@@ -70,6 +70,14 @@ def adapt_runtime_event(
         if isinstance(overtaking, dict)
         else "unavailable"
     )
+    evidence_confidence = record.get("evidence_confidence_score")
+    confidence_value = (
+        evidence_confidence
+        if evidence_confidence is not None
+        else record.get("confidence_score", 0.0)
+    )
+    if confidence_value is None:
+        confidence_value = 0.0
     return PredictedEvent(
         event_id=event_id,
         video_id=video_id,
@@ -77,11 +85,7 @@ def adapt_runtime_event(
         start_seconds=start,
         end_seconds=end,
         event_type=str(record.get("event_type", "left_lane_review_candidate")),
-        confidence=float(
-            record.get("evidence_confidence_score")
-            if record.get("evidence_confidence_score") is not None
-            else record.get("confidence_score", 0.0)
-        ),
+        confidence=float(confidence_value),
         reason_codes=reason_codes,
         geometry_status=str(geometry.get("status", "unavailable")),
         overtaking_status=overtaking_status,

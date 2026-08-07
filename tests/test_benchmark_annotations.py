@@ -73,7 +73,7 @@ def test_json_annotation_loader_accepts_versioned_document(tmp_path) -> None:
     assert document.annotator_id == "annotator_a"
 
 
-def test_confidence_filter_ignores_ambiguous_overlap_in_headline_metrics() -> None:
+def test_low_confidence_positive_does_not_become_generic_ignore_region() -> None:
     high = GroundTruthEvent.model_validate(
         _event(event_id="high", start_seconds=1, end_seconds=2)
     )
@@ -94,6 +94,15 @@ def test_confidence_filter_ignores_ambiguous_overlap_in_headline_metrics() -> No
         MatchingConfig(),
         10.0,
         ignored_annotations=[low],
+        ignored_ground_truth=[low],
     )
-    assert result.metrics.false_positives == 0
-    assert result.ignored_prediction_ids == ("pred_low",)
+    assert result.metrics.false_positives == 1
+    assert result.ignored_prediction_ids == ()
+    assert result.accounting.ignored_ground_truth_events == 1
+
+
+def test_explicit_annotation_role_must_match_label() -> None:
+    with pytest.raises(ValidationError, match="incompatible"):
+        GroundTruthEvent.model_validate(
+            _event(label="legitimate_overtaking", role="ignore_region")
+        )

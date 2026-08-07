@@ -53,13 +53,16 @@ def test_synthetic_integration_metrics_and_per_tag_breakdown(tmp_path) -> None:
     _, report = _synthetic_report(tmp_path)
     overall = report["overall_metrics"]
     assert overall["true_positives"] == 2
-    assert overall["false_positives"] == 1
-    assert overall["false_negatives"] == 0
-    assert overall["precision"] == pytest.approx(2 / 3)
-    assert overall["recall"] == 1.0
-    assert overall["f1"] == 0.8
+    assert overall["false_positives"] == 4
+    assert overall["false_negatives"] == 1
+    assert overall["precision"] == pytest.approx(1 / 3)
+    assert overall["recall"] == pytest.approx(2 / 3)
+    assert overall["f1"] == pytest.approx(4 / 9)
     assert report["scenario_metrics"]["daylight"] == overall
-    assert report["policy_specific_metrics"]["overtake_false_positive_rate"] == 1.0
+    assert report["accounting"]["ignored_predictions"] == 1
+    assert report["accounting"]["filtered_low_confidence_predictions"] == 1
+    assert report["policy_specific_metrics"]["overtake_false_positive_count"] == 1
+    assert report["policy_specific_metrics"]["congestion_false_positive_count"] == 0
 
 
 def test_report_serialization_is_deterministic_and_labeled_synthetic(tmp_path) -> None:
@@ -68,7 +71,9 @@ def test_report_serialization_is_deterministic_and_labeled_synthetic(tmp_path) -
     second_json, second_markdown = write_reports(report, tmp_path / "second")
     assert first_json.read_bytes() == second_json.read_bytes()
     assert first_markdown.read_bytes() == second_markdown.read_bytes()
-    assert "SYNTHETIC EXAMPLE - NOT REAL-WORLD PERFORMANCE" in render_markdown(report)
+    assert "SYNTHETIC INTEGRITY TEST - NOT REAL-WORLD PERFORMANCE" in render_markdown(
+        report
+    )
 
 
 def test_reproducibility_snapshot_contains_config_hash_and_versions(tmp_path) -> None:
@@ -76,6 +81,9 @@ def test_reproducibility_snapshot_contains_config_hash_and_versions(tmp_path) ->
     reproducibility = report["reproducibility"]
     assert reproducibility["git_commit"] == "abc123"
     assert len(reproducibility["config_hash_sha256"]) == 64
+    assert len(reproducibility["dataset_fingerprint"]) == 64
+    assert len(reproducibility["evaluation_fingerprint"]) == 64
+    assert len(reproducibility["production_config_hash_sha256"]) == 64
     assert reproducibility["annotation_schema_versions"] == ["1.0"]
     assert (tmp_path / "resolved_config.yaml").is_file()
 
@@ -89,7 +97,8 @@ def test_baseline_comparison_uses_directional_tolerances(tmp_path) -> None:
         baseline,
         BaselineTolerances(precision=0.01),
     )
-    assert comparison["deltas"]["precision"] == pytest.approx(-0.8 + 2 / 3)
+    assert comparison["comparison_valid"] is True
+    assert comparison["deltas"]["precision"] == pytest.approx(-0.8 + 1 / 3)
     assert comparison["regressions"]["precision"] is True
     assert comparison["regression_detected"] is True
 
@@ -152,6 +161,6 @@ def test_skip_inference_cli_evaluates_prediction_cache(tmp_path, capsys) -> None
     )
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "TP=2 FP=1 FN=0" in output
+    assert "TP=2 FP=4 FN=1" in output
     report = json.loads((tmp_path / "benchmark_report.json").read_text())
-    assert report["overall_metrics"]["f1"] == 0.8
+    assert report["overall_metrics"]["f1"] == pytest.approx(4 / 9)

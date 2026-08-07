@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.benchmark.matcher import temporal_iou
+from app.benchmark.matcher import interval_intersection_seconds, temporal_iou
 from app.benchmark.models import (
     AnnotationLabel,
     FailureRecord,
@@ -29,6 +29,7 @@ def diagnose_false_positive(
     prediction: PredictedEvent,
     annotations: list[GroundTruthEvent],
     sequence: int,
+    matching_diagnostic: dict[str, float | str | None] | None = None,
 ) -> FailureRecord:
     related = _best_overlapping_annotation(prediction, annotations)
     category = "UNKNOWN"
@@ -65,6 +66,16 @@ def diagnose_false_positive(
         timestamp_seconds=prediction.start_seconds,
         ground_truth=(related.model_dump(mode="json") if related else None),
         prediction=prediction.model_dump(mode="json"),
+        best_candidate_iou=_diagnostic_float(matching_diagnostic, "best_candidate_iou"),
+        best_candidate_prediction_coverage=_diagnostic_float(
+            matching_diagnostic, "best_candidate_prediction_coverage"
+        ),
+        matching_rejection_reason=(
+            str(matching_diagnostic.get("matching_rejection_reason"))
+            if matching_diagnostic
+            and matching_diagnostic.get("matching_rejection_reason") is not None
+            else None
+        ),
     )
 
 
@@ -73,11 +84,13 @@ def diagnose_false_negative(
     annotations: list[GroundTruthEvent],
     video_id: str,
     sequence: int,
+    matching_diagnostic: dict[str, float | str | None] | None = None,
 ) -> FailureRecord:
     overlapping_context = [
         event
         for event in annotations
-        if event.event_id != truth.event_id and temporal_iou(event, truth) > 0
+        if event.event_id != truth.event_id
+        and interval_intersection_seconds(event, truth) > 0
     ]
     category = "UNKNOWN"
     rationale = ["no review candidate met the configured temporal matching criteria"]
@@ -104,6 +117,16 @@ def diagnose_false_negative(
         diagnostic_rationale=rationale,
         timestamp_seconds=truth.start_seconds,
         ground_truth=truth.model_dump(mode="json"),
+        best_candidate_iou=_diagnostic_float(matching_diagnostic, "best_candidate_iou"),
+        best_candidate_prediction_coverage=_diagnostic_float(
+            matching_diagnostic, "best_candidate_prediction_coverage"
+        ),
+        matching_rejection_reason=(
+            str(matching_diagnostic.get("matching_rejection_reason"))
+            if matching_diagnostic
+            and matching_diagnostic.get("matching_rejection_reason") is not None
+            else None
+        ),
     )
 
 
@@ -114,7 +137,7 @@ def _best_overlapping_annotation(
         (
             (-temporal_iou(prediction, annotation), annotation.event_id, annotation)
             for annotation in annotations
-            if temporal_iou(prediction, annotation) > 0
+            if interval_intersection_seconds(prediction, annotation) > 0
         ),
         key=lambda item: (item[0], item[1]),
     )
@@ -167,3 +190,10 @@ def _category_for_annotation(
             "prediction overlaps a temporary-left-lane-use annotation",
         )
     return "UNKNOWN", f"prediction overlaps annotation label {label.value}"
+
+
+def _diagnostic_float(
+    diagnostic: dict[str, float | str | None] | None, key: str
+) -> float | None:
+    value = diagnostic.get(key) if diagnostic else None
+    return float(value) if isinstance(value, (int, float)) else None

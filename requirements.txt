@@ -1,0 +1,8 @@
+numpy>=1.26,<3
+opencv-python>=4.10,<5
+pydantic>=2.8,<3
+PyYAML>=6.0,<7
+ultralytics>=8.3,<9
+# 0.28 deprecates the ByteTrack adapter used here; migration is kept explicit.
+supervision>=0.25,<0.28
+pytest>=8,<9

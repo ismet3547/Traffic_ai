@@ -8,6 +8,7 @@ import pytest
 from app.benchmark.models import AnnotationConfidence, DatasetSplit
 from app.dataset.adjudication import create_adjudication, lock_adjudication
 from app.dataset.intake import DuplicateVideoError, register_video
+from app.dataset.integrity import DatasetIntegrityError
 from app.dataset.io import lock_annotation
 from app.dataset.models import (
     DatasetAnnotation,
@@ -174,39 +175,28 @@ def test_release_contains_source_and_annotation_hashes() -> None:
 
 
 def test_unverified_source_identity_fails_quality_gate() -> None:
-    release = build_dataset_release(
-        IntakeRegistry(videos=[record(verified=False)]),
-        split_document(),
-        {"clip": []},
-        {},
-        created_at=NOW,
-    )
-    gate = next(
-        item
-        for item in release.quality_gates
-        if item.gate == "source_video_identities_verified"
-    )
-    assert not gate.passed
+    with pytest.raises(DatasetIntegrityError) as raised:
+        build_dataset_release(
+            IntakeRegistry(videos=[record(verified=False)]),
+            split_document(),
+            {"clip": []},
+            {},
+            created_at=NOW,
+        )
+    assert "SOURCE_VIDEO_IDENTITY_UNVERIFIED" in str(raised.value)
 
 
 def test_nonadjudicated_test_ground_truth_fails_quality_gate() -> None:
     first, second = annotation("a", "a1"), annotation("b", "b1")
-    release = build_dataset_release(
-        IntakeRegistry(videos=[record()]),
-        split_document(),
-        {"clip": [first, second]},
-        {},
-        created_at=NOW,
-    )
-    assert not release.quality_gate_passed
-    assert (
-        next(
-            item
-            for item in release.quality_gates
-            if item.gate == "test_ground_truth_adjudicated"
-        ).passed
-        is False
-    )
+    with pytest.raises(DatasetIntegrityError) as raised:
+        build_dataset_release(
+            IntakeRegistry(videos=[record()]),
+            split_document(),
+            {"clip": [first, second]},
+            {},
+            created_at=NOW,
+        )
+    assert "ADJUDICATION_NOT_APPROVED" in str(raised.value)
 
 
 def test_adjudicated_benchmark_export_is_deterministic() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -33,15 +35,31 @@ def read_json_model(path: str | Path, model_type: type[ModelT]) -> ModelT:
 def write_json_model(document: BaseModel, path: str | Path) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8") as stream:
-        json.dump(
-            document.model_dump(mode="json"),
-            stream,
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        stream.write("\n")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(
+                document.model_dump(mode="json"),
+                stream,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     return destination
 
 
@@ -76,9 +94,7 @@ def load_adjudication(path: str | Path) -> AdjudicationArtifact:
     if document_sha256(artifact.annotation_b) != artifact.annotation_b_hash:
         raise ValueError("ADJUDICATION_ANNOTATION_B_HASH_MISMATCH")
     if artifact.locked:
-        digest = canonical_sha256(
-            artifact.model_dump(mode="json", exclude={"adjudication_hash"})
-        )
+        digest = adjudication_content_hash(artifact)
         if artifact.adjudication_hash != digest:
             raise ValueError("LOCKED_ADJUDICATION_HASH_MISMATCH")
     return artifact
@@ -102,6 +118,12 @@ def validate_annotation_protocol(document: DatasetAnnotation) -> None:
 def annotation_content_hash(document: DatasetAnnotation) -> str:
     return canonical_sha256(
         document.model_dump(mode="json", exclude={"annotation_hash"})
+    )
+
+
+def adjudication_content_hash(document: AdjudicationArtifact) -> str:
+    return canonical_sha256(
+        document.model_dump(mode="json", exclude={"adjudication_hash"})
     )
 
 

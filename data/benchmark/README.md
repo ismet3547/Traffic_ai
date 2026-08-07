@@ -2,6 +2,14 @@
 
 Phase 4.2 real-dataset metadata includes `intake_registry.json`, `dataset_release.json`, both dataset coverage formats, and `REAL_DATASET_STATUS.md`. These record provenance, hashes, permissions, protocol versions, real counts, splits, and quality gates without committing raw video. Independent annotation work remains separate and only approved adjudication enters validation/test benchmark ground truth. See `docs/annotation_handbook.md`.
 
+## Release Integrity
+
+The registry's source SHA-256, byte size, and `source_group_id` are authoritative. `video_id` alone never binds annotations or adjudication to footage. Release construction rechecks every annotation and adjudication against the registry, confirms adjudication references the current locked annotation hashes, and rejects source-group or identical-byte cross-split leakage. Locked does not mean correctly sourced. Official release output is fail-closed and atomically replaced only after integrity passes.
+
+Perfect annotator agreement does not make ground truth valid if both annotators labeled the wrong source video.
+
+A split assignment is not trusted merely because it was produced by the official split tool; release-time leakage checks are mandatory.
+
 Keep annotation JSON and manifest YAML in Git; keep large or third-party videos out of Git unless their redistribution rights are explicit.
 
 ```text

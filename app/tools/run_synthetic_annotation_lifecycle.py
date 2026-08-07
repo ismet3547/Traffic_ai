@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         DatasetAnnotation(
             video_id=record.video_id,
             source_video_sha256=digest,
+            source_video_size_bytes=record.source_video_size_bytes,
             source_file=record.original_filename,
             fps=record.fps,
             video_duration_seconds=record.duration_seconds,
@@ -117,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         DatasetAnnotation(
             video_id=record.video_id,
             source_video_sha256=digest,
+            source_video_size_bytes=record.source_video_size_bytes,
             source_file=record.original_filename,
             fps=record.fps,
             video_duration_seconds=record.duration_seconds,
@@ -192,8 +194,13 @@ def main(argv: list[str] | None = None) -> int:
         agreements=[agreement],
         created_at=now,
     )
+    release_entry = release.videos[0]
     exported = export_adjudicated_annotation(
-        adjudication, record, split=DatasetSplit.TEST
+        adjudication,
+        record,
+        split=DatasetSplit.TEST,
+        source_annotations=annotations[record.video_id],
+        expected_ground_truth_sha256=release_entry.benchmark_ground_truth_sha256,
     )
     write_json_model(registry, output / "intake_registry.json")
     write_json_model(annotation_a, output / "annotations" / "annotator_a.json")

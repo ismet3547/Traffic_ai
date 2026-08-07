@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.benchmark.fingerprints import canonical_sha256
 from app.dataset.agreement import compare_independent_annotations
-from app.dataset.io import document_sha256
+from app.dataset.io import (
+    adjudication_content_hash,
+    annotation_content_hash,
+    document_sha256,
+)
 from app.dataset.models import (
     AdjudicationArtifact,
     AdjudicationDecision,
@@ -28,6 +31,9 @@ def create_adjudication(
 ) -> AdjudicationArtifact:
     if not annotation_a.locked or not annotation_b.locked:
         raise ValueError("independent annotations must be locked before adjudication")
+    for annotation in (annotation_a, annotation_b):
+        if annotation.annotation_hash != annotation_content_hash(annotation):
+            raise ValueError("locked annotation content hash is invalid")
     report = compare_independent_annotations(
         annotation_a, annotation_b, agreement_config
     )
@@ -74,6 +80,12 @@ def create_adjudication(
     )
     return AdjudicationArtifact(
         video_id=annotation_a.video_id,
+        source_video_sha256=annotation_a.source_video_sha256,
+        source_video_size_bytes=(
+            annotation_a.source_video_size_bytes
+            if annotation_a.source_video_size_bytes is not None
+            else annotation_b.source_video_size_bytes
+        ),
         annotation_a=annotation_a,
         annotation_b=annotation_b,
         annotation_a_hash=document_sha256(annotation_a),
@@ -100,7 +112,5 @@ def lock_adjudication(
     candidate = artifact.model_copy(
         update={"locked": True, "locked_at": timestamp, "adjudication_hash": None}
     )
-    digest = canonical_sha256(
-        candidate.model_dump(mode="json", exclude={"adjudication_hash"})
-    )
+    digest = adjudication_content_hash(candidate)
     return candidate.model_copy(update={"adjudication_hash": digest})

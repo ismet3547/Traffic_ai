@@ -1,4 +1,4 @@
-"""Dataset release manifest, annotation quality gates, and benchmark export."""
+"""Fail-closed dataset release construction and benchmark export."""
 
 from __future__ import annotations
 
@@ -11,8 +11,17 @@ from app.benchmark.models import (
     DatasetSplit,
     GroundTruthEvent,
 )
+from app.dataset.integrity import (
+    DatasetIntegrityError,
+    raise_for_release_integrity,
+    validate_adjudication_source_identity,
+    validate_double_annotation,
+    validate_release_integrity,
+)
 from app.dataset.io import document_sha256
 from app.dataset.models import (
+    HANDBOOK_VERSION,
+    ONTOLOGY_VERSION,
     AdjudicationArtifact,
     AdjudicationOutcome,
     AgreementReport,
@@ -20,7 +29,10 @@ from app.dataset.models import (
     DatasetAnnotation,
     DatasetLabel,
     DatasetRelease,
+    DatasetReleaseIntegrityReport,
     IntakeRegistry,
+    IntegrityIssue,
+    IntegrityReasonCode,
     QualityGateResult,
     ReleaseVideo,
     SplitAssignmentDocument,
@@ -49,14 +61,19 @@ def build_dataset_release(
     quality_config: AnnotationQualityConfig | None = None,
     created_at: datetime | None = None,
 ) -> DatasetRelease:
+    """Validate the complete trust boundary before constructing a release."""
+    integrity = validate_release_integrity(
+        registry, split_assignments, annotations, adjudications
+    )
+    raise_for_release_integrity(integrity)
     split_by_video = {
         item.video_id: item.split for item in split_assignments.assignments
     }
     videos: list[ReleaseVideo] = []
     for record in sorted(registry.videos, key=lambda item: item.video_id):
-        if record.video_id not in split_by_video:
-            raise ValueError(f"missing split assignment for {record.video_id}")
+        split = split_by_video[record.video_id]
         documents = annotations.get(record.video_id, [])
+        double = validate_double_annotation(record, documents)
         adjudication = adjudications.get(record.video_id)
         ambiguous = bool(
             adjudication
@@ -65,111 +82,71 @@ def build_dataset_release(
                 for decision in adjudication.decisions
             )
         )
-        if adjudication and adjudication.approved:
+        if adjudication is not None:
             status: Literal["not_required", "pending", "approved", "ambiguous"] = (
                 "ambiguous" if ambiguous else "approved"
             )
-        elif split_by_video[record.video_id].value == "development":
-            status = "not_required"
+            benchmark_document = export_adjudicated_annotation(
+                adjudication,
+                record,
+                split=split,
+                source_annotations=documents,
+            )
+            ground_truth_hash = document_sha256(benchmark_document)
         else:
-            status = "pending"
+            status = "not_required"
+            ground_truth_hash = None
         videos.append(
             ReleaseVideo(
                 video_id=record.video_id,
                 source_group_id=record.source_group_id,
-                split=split_by_video[record.video_id],
+                split=split,
                 source_video_sha256=record.source_video_sha256,
                 source_video_size_bytes=record.source_video_size_bytes,
                 source_identity_verified=record.source_identity_verified,
                 duration_seconds=record.duration_seconds,
-                annotation_hashes={
-                    document.annotator_id: document_sha256(document)
-                    for document in sorted(
-                        documents, key=lambda item: item.annotator_id
-                    )
-                },
+                ontology_version=ONTOLOGY_VERSION,
+                handbook_version=HANDBOOK_VERSION,
+                annotation_hashes=double.annotation_hashes,
                 adjudicated_annotation_hash=(
-                    document_sha256(adjudication) if adjudication else None
+                    document_sha256(adjudication) if adjudication is not None else None
                 ),
-                double_annotated=len({item.annotator_id for item in documents}) >= 2,
+                benchmark_ground_truth_sha256=ground_truth_hash,
+                double_annotated=double.valid,
+                double_annotation=double,
                 adjudication_status=status,
-                test_annotation_locked=bool(adjudication and adjudication.locked),
+                test_annotation_locked=bool(
+                    adjudication is not None and adjudication.locked
+                ),
                 license_or_permission_status=record.license_or_permission_status,
                 redistribution_allowed=record.redistribution_allowed,
                 benchmark_use_allowed=record.benchmark_use_allowed,
             )
         )
-    gates = evaluate_quality_gates(
-        videos,
-        agreements or [],
-        quality_config or AnnotationQualityConfig(),
+    threshold_gates = evaluate_agreement_thresholds(
+        agreements or [], quality_config or AnnotationQualityConfig()
     )
+    gates = [*integrity.gates, *threshold_gates]
     return DatasetRelease(
         dataset_version=registry.dataset_version,
         created_at=created_at or datetime.now(timezone.utc),
         videos=videos,
+        integrity_report=integrity,
         quality_gates=gates,
         quality_gate_passed=all(item.passed for item in gates),
         notes=[
             "No production accuracy requirement is implied by annotation quality gates.",
             "Near-duplicate edited/cropped clips require manual source-group review.",
+            "Release integrity was revalidated independently of intake, annotation, adjudication, and split tooling.",
         ],
     )
 
 
-def evaluate_quality_gates(
-    videos: list[ReleaseVideo],
+def evaluate_agreement_thresholds(
     agreements: list[AgreementReport],
     config: AnnotationQualityConfig,
 ) -> list[QualityGateResult]:
-    validation_test = [
-        item for item in videos if item.split.value in {"validation", "test"}
-    ]
-    test_videos = [item for item in videos if item.split.value == "test"]
-    gates = [
-        _gate(
-            "artifact_schemas_validated",
-            True,
-            "release inputs passed strict Pydantic schema and protocol loading",
-        ),
-        _gate("dataset_has_registered_clips", bool(videos), f"clips={len(videos)}"),
-        _gate(
-            "dataset_provenance_recorded",
-            all(item.benchmark_use_allowed for item in videos),
-            "every clip must explicitly allow benchmark use",
-        ),
-        _gate(
-            "source_video_identities_verified",
-            bool(videos) and all(item.source_identity_verified for item in videos),
-            "all source identities must be verified SHA-256 records",
-        ),
-        _gate(
-            "validation_test_double_annotated",
-            all(item.double_annotated for item in validation_test),
-            f"validation/test clips={len(validation_test)}",
-        ),
-        _gate(
-            "validation_test_disagreements_adjudicated",
-            all(
-                item.adjudication_status in {"approved", "ambiguous"}
-                for item in validation_test
-            ),
-            "every validation/test clip requires reviewed adjudication",
-        ),
-        _gate(
-            "test_ground_truth_adjudicated",
-            all(
-                item.adjudication_status in {"approved", "ambiguous"}
-                for item in test_videos
-            ),
-            f"test clips={len(test_videos)}",
-        ),
-        _gate(
-            "test_annotations_locked",
-            all(item.test_annotation_locked for item in test_videos),
-            "normal tooling must not edit locked test ground truth",
-        ),
-    ]
+    gates: list[QualityGateResult] = []
     if config.minimum_label_agreement is not None:
         actual = (
             sum(item.label_agreement for item in agreements) / len(agreements)
@@ -204,13 +181,15 @@ def export_adjudicated_annotation(
     intake_record: VideoIntakeRecord,
     *,
     split: DatasetSplit,
+    source_annotations: list[DatasetAnnotation] | None = None,
+    expected_ground_truth_sha256: str | None = None,
 ) -> AnnotationDocument:
+    """Export only after revalidating source identity and optional revision/hash ties."""
+    validate_adjudication_source_identity(intake_record, artifact, source_annotations)
     if not artifact.approved:
         raise ValueError("only approved adjudication may enter benchmark ground truth")
-    if split.value == "test" and not artifact.locked:
+    if split == DatasetSplit.TEST and not artifact.locked:
         raise ValueError("test adjudication must be locked before benchmark export")
-    if artifact.video_id != intake_record.video_id:
-        raise ValueError("adjudication and intake video IDs differ")
     events = [
         GroundTruthEvent(
             event_id=event.event_id,
@@ -223,7 +202,7 @@ def export_adjudicated_annotation(
         )
         for event in artifact.final_events
     ]
-    return AnnotationDocument(
+    document = AnnotationDocument(
         video_id=artifact.video_id,
         source_file=intake_record.original_filename,
         fps=intake_record.fps,
@@ -231,6 +210,34 @@ def export_adjudicated_annotation(
         annotator_id="adjudicated",
         events=events,
     )
+    actual_hash = document_sha256(document)
+    if (
+        expected_ground_truth_sha256 is not None
+        and actual_hash != expected_ground_truth_sha256
+    ):
+        issue = IntegrityIssue(
+            reason_code=IntegrityReasonCode.FINAL_GROUND_TRUTH_HASH_MISMATCH,
+            details="exported benchmark ground truth differs from release manifest",
+            video_id=intake_record.video_id,
+            source_group_id=intake_record.source_group_id,
+        )
+        raise DatasetIntegrityError(
+            DatasetReleaseIntegrityReport(
+                passed=False,
+                gates=[
+                    QualityGateResult(
+                        gate="final_ground_truth_hash_valid",
+                        passed=False,
+                        details=issue.reason_code.value,
+                    )
+                ],
+                reason_codes=[issue.reason_code],
+                affected_video_ids=[intake_record.video_id],
+                affected_source_group_ids=[intake_record.source_group_id],
+                issues=[issue],
+            )
+        )
+    return document
 
 
 def _gate(name: str, passed: bool, details: str) -> QualityGateResult:

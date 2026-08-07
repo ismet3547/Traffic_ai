@@ -14,7 +14,8 @@
     "app/tools/generate_dataset_coverage.py",
     "app/tools/build_dataset_release.py",
     "app/tools/export_adjudicated_benchmark.py",
-    "app/tools/run_synthetic_annotation_lifecycle.py"
+    "app/tools/run_synthetic_annotation_lifecycle.py",
+    "app/tools/run_release_integrity_scenarios.py"
   ],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic",

@@ -12,7 +12,8 @@ from app.benchmark.models import AnnotationConfidence, DatasetSplit
 
 DATASET_ANNOTATION_SCHEMA_VERSION: Final = "2.0"
 DATASET_INTAKE_SCHEMA_VERSION: Final = "1.0"
-DATASET_RELEASE_SCHEMA_VERSION: Final = "1.0"
+DATASET_RELEASE_SCHEMA_VERSION: Final = "1.1"
+ADJUDICATION_SCHEMA_VERSION: Final = "1.1"
 ONTOLOGY_VERSION: Final = "pilot-1"
 HANDBOOK_VERSION: Final = "1.0"
 DATASET_VERSION: Final = "pilot-0.1"
@@ -31,6 +32,39 @@ class DatasetLabel(str, Enum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     GEOMETRY_INVALID = "geometry_invalid"
     CAMERA_MOTION_INVALID = "camera_motion_invalid"
+
+
+class IntegrityReasonCode(str, Enum):
+    DATASET_EMPTY = "DATASET_EMPTY"
+    ANNOTATION_VIDEO_ID_MISMATCH = "ANNOTATION_VIDEO_ID_MISMATCH"
+    ANNOTATION_SOURCE_VIDEO_MISMATCH = "ANNOTATION_SOURCE_VIDEO_MISMATCH"
+    ANNOTATION_SOURCE_SIZE_MISMATCH = "ANNOTATION_SOURCE_SIZE_MISMATCH"
+    ANNOTATION_PROTOCOL_MISMATCH = "ANNOTATION_PROTOCOL_MISMATCH"
+    ANNOTATION_SCHEMA_INVALID = "ANNOTATION_SCHEMA_INVALID"
+    ANNOTATION_CONTENT_HASH_MISMATCH = "ANNOTATION_CONTENT_HASH_MISMATCH"
+    ANNOTATION_NOT_LOCKED = "ANNOTATION_NOT_LOCKED"
+    ANNOTATOR_COUNT_INSUFFICIENT = "ANNOTATOR_COUNT_INSUFFICIENT"
+    ANNOTATOR_REVISION_AMBIGUOUS = "ANNOTATOR_REVISION_AMBIGUOUS"
+    ADJUDICATION_VIDEO_ID_MISMATCH = "ADJUDICATION_VIDEO_ID_MISMATCH"
+    ADJUDICATION_SOURCE_VIDEO_MISMATCH = "ADJUDICATION_SOURCE_VIDEO_MISMATCH"
+    ADJUDICATION_SOURCE_SIZE_MISMATCH = "ADJUDICATION_SOURCE_SIZE_MISMATCH"
+    ADJUDICATION_ORIGINAL_HASH_MISMATCH = "ADJUDICATION_ORIGINAL_HASH_MISMATCH"
+    ADJUDICATION_STALE_SOURCE_ANNOTATION = "ADJUDICATION_STALE_SOURCE_ANNOTATION"
+    ADJUDICATION_NOT_APPROVED = "ADJUDICATION_NOT_APPROVED"
+    ADJUDICATION_NOT_LOCKED = "ADJUDICATION_NOT_LOCKED"
+    ADJUDICATION_SCHEMA_INVALID = "ADJUDICATION_SCHEMA_INVALID"
+    ADJUDICATION_CONTENT_HASH_MISMATCH = "ADJUDICATION_CONTENT_HASH_MISMATCH"
+    SPLIT_ASSIGNMENT_MISSING = "SPLIT_ASSIGNMENT_MISSING"
+    SPLIT_ASSIGNMENT_DUPLICATE = "SPLIT_ASSIGNMENT_DUPLICATE"
+    SPLIT_ASSIGNMENT_UNKNOWN_VIDEO = "SPLIT_ASSIGNMENT_UNKNOWN_VIDEO"
+    SOURCE_GROUP_ID_MISMATCH = "SOURCE_GROUP_ID_MISMATCH"
+    SOURCE_GROUP_SPLIT_LEAKAGE = "SOURCE_GROUP_SPLIT_LEAKAGE"
+    DUPLICATE_VIDEO_CROSS_SPLIT_LEAKAGE = "DUPLICATE_VIDEO_CROSS_SPLIT_LEAKAGE"
+    SOURCE_VIDEO_IDENTITY_UNVERIFIED = "SOURCE_VIDEO_IDENTITY_UNVERIFIED"
+    BENCHMARK_USE_NOT_ALLOWED = "BENCHMARK_USE_NOT_ALLOWED"
+    UNKNOWN_ANNOTATION_VIDEO = "UNKNOWN_ANNOTATION_VIDEO"
+    UNKNOWN_ADJUDICATION_VIDEO = "UNKNOWN_ADJUDICATION_VIDEO"
+    FINAL_GROUND_TRUTH_HASH_MISMATCH = "FINAL_GROUND_TRUTH_HASH_MISMATCH"
 
 
 class VisibilityQuality(str, Enum):
@@ -121,6 +155,7 @@ class DatasetAnnotation(StrictModel):
     handbook_version: str = HANDBOOK_VERSION
     video_id: str = Field(min_length=1)
     source_video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_video_size_bytes: int | None = Field(default=None, gt=0)
     source_file: str = Field(min_length=1)
     fps: float = Field(gt=0)
     video_duration_seconds: float = Field(gt=0)
@@ -316,8 +351,10 @@ class AdjudicationDecision(StrictModel):
 
 
 class AdjudicationArtifact(StrictModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = ADJUDICATION_SCHEMA_VERSION
     video_id: str
+    source_video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_video_size_bytes: int | None = Field(default=None, gt=0)
     ontology_version: str = ONTOLOGY_VERSION
     handbook_version: str = HANDBOOK_VERSION
     annotation_a: DatasetAnnotation
@@ -341,6 +378,40 @@ class AdjudicationArtifact(StrictModel):
             or self.annotation_b.video_id != self.video_id
         ):
             raise ValueError("adjudication annotations must match video_id")
+        if self.agreement_report.video_id != self.video_id or {
+            self.agreement_report.annotator_a,
+            self.agreement_report.annotator_b,
+        } != {self.annotation_a.annotator_id, self.annotation_b.annotator_id}:
+            raise ValueError(
+                "adjudication agreement report does not match original annotations"
+            )
+        if any(
+            annotation.ontology_version != self.ontology_version
+            or annotation.handbook_version != self.handbook_version
+            for annotation in (self.annotation_a, self.annotation_b)
+        ):
+            raise ValueError(
+                "adjudication protocol versions must match original annotations"
+            )
+        if (
+            self.annotation_a.source_video_sha256 != self.source_video_sha256
+            or self.annotation_b.source_video_sha256 != self.source_video_sha256
+        ):
+            raise ValueError(
+                "adjudication source identity must match both original annotations"
+            )
+        annotation_sizes = {
+            value
+            for value in (
+                self.annotation_a.source_video_size_bytes,
+                self.annotation_b.source_video_size_bytes,
+            )
+            if value is not None
+        }
+        if len(annotation_sizes) > 1 or (
+            annotation_sizes and self.source_video_size_bytes not in annotation_sizes
+        ):
+            raise ValueError("adjudication source size must match original annotations")
         final_ids = [event.event_id for event in self.final_events]
         if len(final_ids) != len(set(final_ids)):
             raise ValueError("adjudicated event IDs must be unique")
@@ -407,6 +478,53 @@ class QualityGateResult(StrictModel):
     details: str
 
 
+class IntegrityIssue(StrictModel):
+    reason_code: IntegrityReasonCode
+    details: str
+    video_id: str | None = None
+    source_group_id: str | None = None
+
+
+class ArtifactIntegrityResult(StrictModel):
+    valid: bool
+    reason_codes: list[IntegrityReasonCode]
+    issues: list[IntegrityIssue] = Field(default_factory=list)
+
+
+class DatasetReleaseIntegrityReport(StrictModel):
+    passed: bool
+    gates: list[QualityGateResult]
+    reason_codes: list[IntegrityReasonCode]
+    affected_video_ids: list[str]
+    affected_source_group_ids: list[str]
+    issues: list[IntegrityIssue] = Field(default_factory=list)
+
+
+class IntegrityScenarioOutcome(StrictModel):
+    scenario: str
+    expected: Literal["PASS", "FAIL"]
+    actual: Literal["PASS", "FAIL"]
+    expectation_met: bool
+    reason_codes: list[IntegrityReasonCode] = Field(default_factory=list)
+    release_written: bool
+
+
+class IntegrityScenarioSummary(StrictModel):
+    all_expectations_met: bool
+    scenarios: list[IntegrityScenarioOutcome]
+
+
+class ValidatedDoubleAnnotation(StrictModel):
+    valid: bool
+    annotator_count: int = Field(ge=0)
+    source_identity_valid: bool
+    protocol_versions_compatible: bool
+    locked: bool
+    current_revisions: bool
+    annotation_hashes: dict[str, str] = Field(default_factory=dict)
+    reason_codes: list[IntegrityReasonCode] = Field(default_factory=list)
+
+
 class AnnotationQualityConfig(StrictModel):
     minimum_label_agreement: float | None = Field(default=None, ge=0, le=1)
     minimum_event_match_rate: float | None = Field(default=None, ge=0, le=1)
@@ -420,9 +538,13 @@ class ReleaseVideo(StrictModel):
     source_video_size_bytes: int = Field(gt=0)
     source_identity_verified: bool
     duration_seconds: float = Field(gt=0)
+    ontology_version: str
+    handbook_version: str
     annotation_hashes: dict[str, str]
     adjudicated_annotation_hash: str | None = None
+    benchmark_ground_truth_sha256: str | None = None
     double_annotated: bool
+    double_annotation: ValidatedDoubleAnnotation
     adjudication_status: Literal["not_required", "pending", "approved", "ambiguous"]
     test_annotation_locked: bool
     license_or_permission_status: PermissionStatus
@@ -431,12 +553,13 @@ class ReleaseVideo(StrictModel):
 
 
 class DatasetRelease(StrictModel):
-    schema_version: Literal["1.0"] = DATASET_RELEASE_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = DATASET_RELEASE_SCHEMA_VERSION
     dataset_version: str = DATASET_VERSION
     created_at: datetime
     ontology_version: str = ONTOLOGY_VERSION
     handbook_version: str = HANDBOOK_VERSION
     videos: list[ReleaseVideo]
+    integrity_report: DatasetReleaseIntegrityReport
     quality_gates: list[QualityGateResult]
     quality_gate_passed: bool
     notes: list[str] = Field(default_factory=list)

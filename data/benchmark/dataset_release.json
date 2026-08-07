@@ -2,18 +2,37 @@
   "created_at": "2026-08-08T00:00:00Z",
   "dataset_version": "pilot-0.1",
   "handbook_version": "1.0",
+  "integrity_report": {
+    "affected_source_group_ids": [],
+    "affected_video_ids": [],
+    "gates": [
+      {"details": "no clips registered", "gate": "dataset_has_registered_clips", "passed": false},
+      {"details": "registry, annotation, and adjudication source identities agree", "gate": "source_identity_chain_valid", "passed": true},
+      {"details": "each registered video has exactly one registry-aligned split", "gate": "split_document_complete", "passed": true},
+      {"details": "source groups and byte-identical videos do not cross splits", "gate": "split_group_isolation_valid", "passed": true},
+      {"details": "validation/test double annotations are locked and identity-valid", "gate": "double_annotation_valid", "passed": true},
+      {"details": "adjudications are approved and reference current annotation revisions", "gate": "adjudication_current", "passed": true},
+      {"details": "test adjudications are locked", "gate": "test_annotations_locked", "passed": true},
+      {"details": "all source video identities are verified", "gate": "source_video_identity_verified", "passed": true},
+      {"details": "all released annotations use the current ontology and handbook", "gate": "ontology_compatible", "passed": true},
+      {"details": "all registry entries explicitly permit benchmark use", "gate": "benchmark_use_allowed", "passed": true},
+      {"details": "1 integrity blocker(s) detected", "gate": "release_artifacts_validated", "passed": false}
+    ],
+    "issues": [
+      {"details": "official release contains no registered clips", "reason_code": "DATASET_EMPTY", "source_group_id": null, "video_id": null}
+    ],
+    "passed": false,
+    "reason_codes": ["DATASET_EMPTY"]
+  },
   "notes": [
     "Empty initial real-dataset manifest; no real footage or annotations are claimed."
   ],
   "ontology_version": "pilot-1",
   "quality_gate_passed": false,
   "quality_gates": [
-    {
-      "details": "clips=0",
-      "gate": "dataset_has_registered_clips",
-      "passed": false
-    }
+    {"details": "no clips registered", "gate": "dataset_has_registered_clips", "passed": false},
+    {"details": "1 integrity blocker(s) detected", "gate": "release_artifacts_validated", "passed": false}
   ],
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "videos": []
 }

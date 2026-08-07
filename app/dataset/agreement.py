@@ -188,6 +188,12 @@ def _validate_pair(first: DatasetAnnotation, second: DatasetAnnotation) -> None:
         raise ValueError("HANDBOOK_VERSION_MISMATCH between annotators")
     if first.source_video_sha256 != second.source_video_sha256:
         raise ValueError("annotators reference different source video identities")
+    if (
+        first.source_video_size_bytes is not None
+        and second.source_video_size_bytes is not None
+        and first.source_video_size_bytes != second.source_video_size_bytes
+    ):
+        raise ValueError("annotators reference different source video sizes")
 
 
 def _temporal(event: DatasetEvent) -> _AgreementTemporalEvent:

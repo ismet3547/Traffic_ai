@@ -436,7 +436,7 @@ python -m app.tools.adjudicate_annotations annotation_work/highway_001/annotator
 python -m app.tools.assign_dataset_splits --candidates split_candidates.json --output split_assignments.json --seed 42
 python -m app.tools.generate_dataset_coverage --annotations-dir annotation_work --agreements-dir agreements --output-dir release_work
 python -m app.tools.build_dataset_release --splits split_assignments.json --annotations-dir annotation_work/independent --adjudications-dir annotation_work/adjudicated --output release_work/dataset_release.json
-python -m app.tools.export_adjudicated_benchmark --adjudication annotation_work/highway_001/adjudicated.json --splits split_assignments.json --output data/benchmark/annotations/highway_001.json
+python -m app.tools.export_adjudicated_benchmark --adjudication annotation_work/highway_001/adjudicated.json --annotations-dir annotation_work/highway_001 --splits split_assignments.json --release release_work/dataset_release.json --output data/benchmark/annotations/highway_001.json
 ```
 
 The event helper accepts repeatable inline JSON or JSON-file inputs and provides a frame/timestamp-assisted CLI workflow; use the existing frame extractor and a media player for frame stepping and seeking. Label definitions, boundary rules, evidence semantics, confidence levels, hard cases, and adjudication are normative in `docs/annotation_handbook.md`.
@@ -450,6 +450,26 @@ python -m app.tools.run_synthetic_annotation_lifecycle --output benchmark_output
 ```
 
 These generated artifacts are test-only and make no real-human-annotation claim.
+
+### Release Integrity
+
+`video_id` is a logical name, not source identity. Phase 4.2.1 binds every release entry to the registry SHA-256 and byte size, validates each annotation against those bytes, and makes adjudication carry the same identity. It also compares the adjudication's stored original-annotation hashes with the exact current annotation revisions. An override and relock therefore makes old adjudication stale until the clip is adjudicated again.
+
+**Perfect annotator agreement does not make ground truth valid if both annotators labeled the wrong source video.** A locked artifact can likewise be internally stable but still refer to the wrong source; lock state never substitutes for provenance validation.
+
+The release boundary independently validates every split entry. Registry `source_group_id` is authoritative, each registered video must have exactly one assignment, unknown/duplicate entries fail, and a group cannot span splits. Byte-identical source SHA-256 values also cannot cross splits even when they were accidentally given different video and group IDs. **A split assignment is not trusted merely because it was produced by the official split tool; release-time leakage checks are mandatory.** Same-byte duplicates in one split are permitted but should normally share a source group and remain subject to manual near-duplicate review.
+
+Validation/test clips require two distinct, locked, current, source-matched, protocol-compatible annotation revisions plus approved adjudication; test adjudication must also be locked. Development may carry a clearly marked single annotation, but source and protocol integrity remain mandatory. The release manifest stores exact source, annotation, adjudication, and exported ground-truth content hashes, along with a typed integrity report and affected IDs.
+
+Official release construction is fail-closed: all artifacts are loaded and checked in memory before output, and JSON persistence uses a same-directory temporary file plus atomic replacement. The benchmark export requires the validated release, current source annotations, registry, and split document, then verifies that regenerated ground truth matches the release hash.
+
+Run the repeatable integrity scenarios:
+
+```powershell
+python -m app.tools.run_release_integrity_scenarios --output benchmark_output/phase421_integrity
+```
+
+They cover a valid release, perfect agreement on the wrong source SHA, manually leaked source groups, duplicate bytes across splits, and stale adjudication. Only the valid scenario writes a release.
 
 ## Tests and checks
 

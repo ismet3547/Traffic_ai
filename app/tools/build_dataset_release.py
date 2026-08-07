@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from app.dataset.integrity import DatasetIntegrityError
 from app.dataset.io import (
     load_adjudication,
     load_annotation,
@@ -33,17 +34,27 @@ def main(argv: list[str] | None = None) -> int:
     adjudications = {}
     for path in sorted(Path(args.adjudications_dir).rglob("*.json")):
         artifact = load_adjudication(path)
+        if artifact.video_id in adjudications:
+            raise ValueError(
+                f"duplicate adjudication artifacts for {artifact.video_id}"
+            )
         adjudications[artifact.video_id] = artifact
-    release = build_dataset_release(
-        load_registry(args.registry),
-        read_json_model(args.splits, SplitAssignmentDocument),
-        annotations,
-        adjudications,
-        quality_config=AnnotationQualityConfig(
-            minimum_label_agreement=args.minimum_label_agreement,
-            minimum_event_match_rate=args.minimum_event_match_rate,
-        ),
-    )
+    try:
+        release = build_dataset_release(
+            load_registry(args.registry),
+            read_json_model(args.splits, SplitAssignmentDocument),
+            annotations,
+            adjudications,
+            quality_config=AnnotationQualityConfig(
+                minimum_label_agreement=args.minimum_label_agreement,
+                minimum_event_match_rate=args.minimum_event_match_rate,
+            ),
+        )
+    except DatasetIntegrityError as exc:
+        print(str(exc))
+        for gate in exc.report.gates:
+            print(f"{'PASS' if gate.passed else 'FAIL'} {gate.gate}: {gate.details}")
+        return 2
     write_json_model(release, args.output)
     for gate in release.quality_gates:
         print(f"{'PASS' if gate.passed else 'FAIL'} {gate.gate}: {gate.details}")

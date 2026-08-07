@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         document = DatasetAnnotation(
             video_id=args.video_id or video.stem,
             source_video_sha256=digest,
+            source_video_size_bytes=video.stat().st_size,
             source_file=video.name,
             fps=fps,
             video_duration_seconds=duration,

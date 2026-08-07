@@ -1,0 +1,33 @@
+schema_version: "1.0"
+name: phase4_synthetic_ci
+synthetic: true
+
+benchmark:
+  matching:
+    minimum_temporal_iou: 0.30
+    start_tolerance_seconds: 2.0
+    require_track_association_if_available: false
+  headline_confidences: [high]
+  acceptance:
+    minimum_precision: null
+    minimum_recall: null
+    maximum_false_positives_per_hour: null
+  baseline_tolerances:
+    precision: 0.000001
+    recall: 0.000001
+    f1: 0.000001
+    false_positives_per_hour: 0.000001
+    processing_fps: 0.001
+  failure_artifacts: false
+  failure_clip_padding_seconds: 2.0
+
+videos:
+  - id: synthetic_video_a
+    path: null
+    annotation: ../annotations/synthetic_video_a.json
+    additional_annotations:
+      - ../annotations/synthetic_video_a_annotator_b.json
+    config: null
+    duration_seconds: 120.0
+    split: validation
+    tags: [daylight, free_flow, fixed_camera, three_lane]

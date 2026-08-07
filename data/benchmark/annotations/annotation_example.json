@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "video_id": "replace_with_video_id",
+  "source_file": "replace_with_video_name.mp4",
+  "fps": 30.0,
+  "video_duration_seconds": 60.0,
+  "annotator_id": "annotator_a",
+  "events": [
+    {
+      "event_id": "gt_001",
+      "vehicle_track_hint": null,
+      "start_seconds": 12.4,
+      "end_seconds": 21.0,
+      "label": "unnecessary_left_lane_occupation",
+      "confidence": "high",
+      "notes": "EXAMPLE ONLY: replace this interval and label after reviewing the video."
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "video_id": "synthetic_video_a",
+  "source_file": "synthetic://video_a",
+  "fps": 30.0,
+  "video_duration_seconds": 120.0,
+  "annotator_id": "annotator_b",
+  "events": [
+    {
+      "event_id": "b_violation_001",
+      "vehicle_track_hint": 11,
+      "start_seconds": 10.2,
+      "end_seconds": 20.2,
+      "label": "unnecessary_left_lane_occupation",
+      "confidence": "high"
+    },
+    {
+      "event_id": "b_violation_002",
+      "vehicle_track_hint": 22,
+      "start_seconds": 30.1,
+      "end_seconds": 40.0,
+      "label": "unnecessary_left_lane_occupation",
+      "confidence": "high"
+    },
+    {
+      "event_id": "b_overtake_001",
+      "vehicle_track_hint": 33,
+      "start_seconds": 50.2,
+      "end_seconds": 60.1,
+      "label": "legitimate_overtaking",
+      "confidence": "high"
+    }
+  ]
+}

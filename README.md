@@ -35,15 +35,17 @@ traffic_ai/
     context/ overtaking/    traffic context and contextual pass assessment
     rules/ candidates/      left-lane policy and explicit lifecycle
     events/ video/          evidence persistence and debug rendering
-    tools/                  non-GUI calibration preview
+    benchmark/              offline annotations, matching, metrics and reports
+    tools/                  calibration and benchmark developer CLIs
     models/                 framework-neutral typed records
+  data/benchmark/           schemas/examples; raw videos remain local
   configs/
     default.yaml
     calibrated_example.yaml # placeholder values only
   tests/                    model-independent unit/integration tests
 ```
 
-Phase 2 introduced contextual overtaking, congestion, lane transitions, and right-lane opportunity. Phase 3 introduced optional road-plane geometry and approximate speed. Phase 3.1 hardened physical-unit trust and lifecycle closure. Phase 3.2 makes camera/road geometry trust a prerequisite for every geometry-dependent judgment.
+Phase 2 introduced contextual overtaking, congestion, lane transitions, and right-lane opportunity. Phase 3 introduced optional road-plane geometry and approximate speed. Phase 3.1 hardened physical-unit trust and lifecycle closure. Phase 3.2 makes camera/road geometry trust a prerequisite for every geometry-dependent judgment. Phase 4 adds an offline measurement layer and does not alter the production decision policy.
 
 ## Geometry Integrity
 
@@ -247,6 +249,117 @@ Schema 3.2 metadata contains bounded lifecycle decisions, close/cancel/final tim
 
 The overlay can show track/lane, coordinate mode, approximate speed or `N/A`, explicitly-unitized right gap, overtaking and lifecycle states, congestion, calibration quality, pose status, and physical-measurement availability. Advanced fields are configurable.
 
+## Benchmarking and validation
+
+The Phase 4 benchmark is separate from detection, tracking, and traffic-rule code. It can run the existing analyzer once, normalize finalized `events.jsonl` records into stable prediction caches, and evaluate those caches repeatedly without loading YOLO:
+
+```text
+benchmark manifest
+  -> existing app.main inference OR predictions/<video_id>.json
+  -> versioned annotation validation
+  -> deterministic one-to-one temporal matching
+  -> overall, per-video, per-tag, confidence and suppression metrics
+  -> suspected FP/FN diagnostics and optional evidence bundles
+  -> resolved config snapshot + JSON/Markdown report
+```
+
+Start by copying [the benchmark manifest template](data/benchmark/manifests/benchmark_manifest.example.yaml) and [annotation example](data/benchmark/annotations/annotation_example.json). Put local videos under `data/benchmark/videos/` or reference an external path. Raw benchmark videos are ignored by Git by default; do not commit large or unlicensed footage.
+
+Each annotation document is schema `1.0`, belongs to one video and anonymous `annotator_id`, and contains explicit intervals. Supported behavior labels are:
+
+- `unnecessary_left_lane_occupation`: positive event for candidate precision/recall;
+- `legitimate_overtaking`, `congestion_left_lane_use`, `right_lane_unavailable`, and `temporary_left_lane_use`: suppression/control scenarios;
+- `insufficient_evidence`: an intentionally ambiguous interval;
+- `geometry_invalid`, `camera_motion`, and `lane_assignment_uncertain`: diagnostic conditions.
+
+Confidence is `high`, `medium`, or `low`. Headline metrics default to high-confidence annotations. Excluded-confidence intervals act as ignore regions so an ambiguous interval is not silently converted into absolute truth; exact high/medium/low strata are also reported. A manifest may add independent annotation documents through `additional_annotations`; pairwise label agreement, temporal agreement, unmatched counts, mean temporal IoU, and matched-label Cohen's kappa are reported with an explicit caveat.
+
+Manifest tags such as `daylight`, `night`, `rain`, `free_flow`, `dense_traffic`, `fixed_camera`, `camera_motion`, `curved_road`, `heavy_trucks`, `occlusion`, and `low_resolution` produce scenario-specific metrics. Every entry also has a dataset split:
+
+- `development`: threshold and policy tuning;
+- `validation`: model/policy selection;
+- `test`: reserved final measurement, not tuning.
+
+The benchmark never changes production thresholds. `--split` defaults to `validation`; choosing `test` must be deliberate.
+
+### Run and replay
+
+Run inference and evaluate a local manifest:
+
+```powershell
+python -m app.tools.run_benchmark `
+  --manifest data/benchmark/manifests/my_manifest.yaml `
+  --output benchmark_output/run_001 `
+  --split validation
+```
+
+Inference writes normalized caches to `benchmark_output/run_001/predictions/<video_id>.json`. Evaluate them again without detector/tracker work:
+
+```powershell
+python -m app.tools.run_benchmark `
+  --manifest data/benchmark/manifests/my_manifest.yaml `
+  --output benchmark_output/replay_001 `
+  --predictions-dir benchmark_output/run_001/predictions `
+  --skip-inference `
+  --split validation
+```
+
+The CI-safe synthetic replay uses no video and downloads no model weights:
+
+```powershell
+python -m app.tools.run_benchmark `
+  --manifest data/benchmark/manifests/synthetic_manifest.yaml `
+  --output benchmark_output/synthetic `
+  --predictions-dir data/benchmark/predictions `
+  --skip-inference `
+  --no-failure-artifacts `
+  --split validation
+```
+
+Its committed [example report](data/benchmark/examples/SYNTHETIC_REPORT.md) is explicitly synthetic and is not a real-world performance result.
+
+Validate annotation schemas/references and extract timestamped review frames:
+
+```powershell
+python -m app.tools.validate_annotations `
+  --manifest data/benchmark/manifests/my_manifest.yaml
+
+python -m app.tools.extract_annotation_frames `
+  --video data/benchmark/videos/highway_001.mp4 `
+  --output benchmark_output/annotation_frames/highway_001 `
+  --every-seconds 2 `
+  --contact-sheet
+```
+
+Inspect the highest-confidence failures after a run:
+
+```powershell
+python -m app.tools.inspect_failures `
+  --report benchmark_output/run_001/benchmark_report.json `
+  --kind false_positive `
+  --limit 20
+```
+
+### Matching and metric definitions
+
+Temporal IoU is interval intersection duration divided by interval union duration. The implementation forms every eligible pair, sorts by descending IoU followed by absolute start error, absolute duration error and stable event IDs, then greedily accepts pairs while enforcing one-to-one use. A pair must meet the inclusive `minimum_temporal_iou` and optional inclusive `start_tolerance_seconds`; track association is optional because runtime and annotation track IDs are often unrelated.
+
+- Precision = `TP / (TP + FP)`.
+- Recall = `TP / (TP + FN)`.
+- F1 = `2 * precision * recall / (precision + recall)`.
+- A zero denominator produces `0.0`, never NaN.
+- FP/hour and FN/hour divide counts by the evaluated video duration in hours.
+- Start-time and duration errors are prediction values minus matched ground-truth values; absolute summaries are also included.
+- Real-time factor is video duration divided by measured end-to-end processing time; values greater than 1 are faster than real time.
+
+Reports include overall, per-video, per-tag, confidence-stratified and policy-specific suppression metrics, timing errors, performance/hardware metadata when inference was measured, annotation agreement, acceptance criteria if configured, and a suspected failure breakdown. `benchmark_report.json` is machine-readable; `benchmark_report.md` is the human review summary. `resolved_config.yaml`, configuration/annotation/prediction-cache SHA-256 hashes, Git commit and dirty-worktree state when available, annotation/benchmark schema versions, policy version, detector identifier, and tracker identifier make runs reproducible. Git/version failures are recorded as null and warned, never fabricated.
+
+When enabled, FP/FN bundles are written under `failures/<video_id>/<failure_id>/` with diagnostic metadata and copied or extracted representative media. Categories such as `OVERTAKING_LOGIC_ERROR` and `GEOMETRY_INTEGRITY_ERROR` are heuristic suspects, not asserted root causes. Current production output has rich event-level context but no machine-readable per-frame telemetry stream, so detection misses and tracker ID switches cannot always be diagnosed automatically.
+
+Pass `--baseline previous/benchmark_report.json` to report precision, recall, F1, FP/hour and processing-FPS deltas. Direction-aware tolerances avoid treating floating-point noise as a regression. Optional acceptance criteria report PASS/FAIL only when explicitly configured; the repository invents no government or production-readiness threshold.
+
+No real-world accuracy claim should be made until a sufficiently diverse, independently annotated test set has been evaluated.
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:
@@ -258,7 +371,7 @@ python -m ruff format --check app tests
 python -m compileall -q app tests
 ```
 
-Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, and synthetic pipeline flows.
+Coverage includes independent world/pixel validation, spatial coverage and support-region rejection, resolution/aspect compatibility, pose noise and cumulative translation/rotation/scale/projective movement, fail-closed lanes/speed/gaps/candidates, lifecycle suspension/cancellation, tracker jumps/dropout, queue integrity/idempotence, synthetic pipeline flows, annotation validation, deterministic matching, exact metrics, failure diagnostics, reports, baseline comparison, annotator agreement, and cache-only benchmark replay.
 
 ## Known limitations
 
@@ -266,5 +379,6 @@ Coverage includes independent world/pixel validation, spatial coverage and suppo
 - The road is approximated as a plane; lens distortion is not modeled. Undistort footage first when needed.
 - The pose diagnostic is not stabilization and cannot support moving-drone traffic judgments. Large drone altitude/orientation changes invalidate a static homography; production moving-drone use requires tested stabilization plus synchronized transformation/revalidation of lanes and road calibration.
 - Detection absence is not proof that a lane or gap is clear. Occlusion and tracker ID switches still affect context.
+- Benchmark quality is limited by scenario coverage, annotation consistency, interval definitions, and whether the annotation set is exhaustive. Event-level output cannot by itself prove the root cause of every FP/FN.
 - Thresholds and lane geometry require site-specific validation. Weather, signs, roadworks, emergency behavior, and jurisdiction-specific exceptions are not interpreted.
 - Outputs are review candidates only. Human judgment remains mandatory; automatic enforcement is intentionally absent.

@@ -1,0 +1,65 @@
+schema_version: "1.0"
+name: replace_with_benchmark_name
+synthetic: false
+
+benchmark:
+  matching:
+    minimum_temporal_iou: 0.30
+    start_tolerance_seconds: 2.0
+    require_track_association_if_available: false
+  headline_confidences: [high]
+  acceptance:
+    minimum_precision: null
+    minimum_recall: null
+    maximum_false_positives_per_hour: null
+  baseline_tolerances:
+    precision: 0.001
+    recall: 0.001
+    f1: 0.001
+    false_positives_per_hour: 0.05
+    processing_fps: 0.10
+  failure_artifacts: true
+  failure_clip_padding_seconds: 2.0
+
+# EXAMPLE/PLACEHOLDER entries. Set enabled: true only after adding each local
+# video, camera-specific production config, and independently reviewed annotation.
+videos:
+  - id: fixed_camera_free_flow_day
+    path: ../videos/fixed_camera_free_flow_day.mp4
+    annotation: ../annotations/fixed_camera_free_flow_day.json
+    config: ../../../configs/demo_fixed_camera.yaml
+    tags: [daylight, free_flow, fixed_camera, three_lane]
+    split: development
+    enabled: false
+
+  - id: fixed_camera_dense_traffic
+    path: ../videos/fixed_camera_dense_traffic.mp4
+    annotation: ../annotations/fixed_camera_dense_traffic.json
+    config: ../../../configs/demo_fixed_camera.yaml
+    tags: [daylight, dense_traffic, fixed_camera]
+    split: validation
+    enabled: false
+
+  - id: legitimate_overtaking
+    path: ../videos/legitimate_overtaking.mp4
+    annotation: ../annotations/legitimate_overtaking.json
+    config: ../../../configs/demo_fixed_camera.yaml
+    tags: [free_flow, legitimate_overtaking, fixed_camera]
+    split: validation
+    enabled: false
+
+  - id: left_lane_occupation
+    path: ../videos/left_lane_occupation.mp4
+    annotation: ../annotations/left_lane_occupation.json
+    config: ../../../configs/demo_fixed_camera.yaml
+    tags: [daylight, free_flow, left_lane_occupation, fixed_camera]
+    split: test
+    enabled: false
+
+  - id: geometry_failure
+    path: ../videos/geometry_failure.mp4
+    annotation: ../annotations/geometry_failure.json
+    config: ../../../configs/default.yaml
+    tags: [camera_motion, geometry_failure]
+    split: development
+    enabled: false

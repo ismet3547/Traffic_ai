@@ -6,4 +6,7 @@ __pycache__/
 input/*.mp4
 output/*
 !output/.gitkeep
+benchmark_output/
+data/benchmark/videos/*
+!data/benchmark/videos/.gitkeep
 *.pt

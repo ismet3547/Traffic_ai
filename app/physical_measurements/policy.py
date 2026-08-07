@@ -103,3 +103,18 @@ class PhysicalMeasurementPolicy:
                 )
             self._last_signature = signature
         return permission
+
+    @staticmethod
+    def apply_track_stability(
+        permission: PhysicalMeasurementPermission, *, track_stable: bool
+    ) -> PhysicalMeasurementPermission:
+        """Derive a per-track permission without changing global policy state."""
+
+        if track_stable or not permission.allowed:
+            return permission
+        return PhysicalMeasurementPermission(
+            allowed=False,
+            confidence=0.0,
+            status="unavailable",
+            reason_codes=("UNSTABLE_TRACK",),
+        )

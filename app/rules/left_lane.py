@@ -15,6 +15,7 @@ from app.models import (
     OvertakeState,
     OvertakingAssessment,
     OvertakingStatus,
+    PhysicalMeasurementPermission,
     RuleEvaluation,
     SpeedEstimate,
     TrafficFrameContext,
@@ -433,6 +434,18 @@ class LeftLaneRuleEngine:
             else state.entered_at
         )
         global_context = frame_context.global_context if frame_context else None
+        permission = global_context.physical_measurements if global_context else None
+        if (
+            position is not None
+            and not position.calibrated
+            and position.physical_measurement_reason_codes
+        ):
+            permission = PhysicalMeasurementPermission(
+                allowed=False,
+                confidence=0.0,
+                status=position.physical_measurement_status,
+                reason_codes=position.physical_measurement_reason_codes,
+            )
         return CandidateTransition(
             transition=kind,  # type: ignore[arg-type]
             track_id=track_id,
@@ -475,9 +488,7 @@ class LeftLaneRuleEngine:
             else None,
             camera_motion=global_context.camera_motion if global_context else None,
             camera_pose=global_context.camera_pose if global_context else None,
-            physical_measurements=global_context.physical_measurements
-            if global_context
-            else None,
+            physical_measurements=permission,
         )
 
     def _status(
@@ -520,6 +531,17 @@ class LeftLaneRuleEngine:
             if frame_context
             else None
         )
+        if (
+            position is not None
+            and not position.calibrated
+            and position.physical_measurement_reason_codes
+        ):
+            permission = PhysicalMeasurementPermission(
+                allowed=False,
+                confidence=0.0,
+                status=position.physical_measurement_status,
+                reason_codes=position.physical_measurement_reason_codes,
+            )
         return VehicleRuleStatus(
             track_id=observation.vehicle.track_id,
             lane_id=observation.lane_id,

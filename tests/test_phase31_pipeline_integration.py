@@ -256,7 +256,11 @@ def _run(
             calibration, RoadPositionConfig(travel_direction="toward_bottom")
         ),
         speed_estimator=RollingSpeedEstimator(
-            SpeedEstimationConfig(minimum_window_seconds=0.1, minimum_samples=2)
+            SpeedEstimationConfig(
+                minimum_window_seconds=0.1,
+                minimum_samples=2,
+                max_position_jump_meters=2.0,
+            )
         ),
         camera_motion_estimator=_Motion(motion),
         camera_pose_validator=CameraPoseValidator(
@@ -303,6 +307,14 @@ def test_pipeline_camera_move_disables_previously_valid_measurements() -> None:
     assert capture.contexts[0].global_context.physical_measurements.allowed
     assert not capture.contexts[1].global_context.physical_measurements.allowed
     assert capture.contexts[1].speeds[1].speed_kph is None
+
+
+def test_pipeline_tracker_jump_scrubs_world_position_before_context() -> None:
+    _, _, capture = _run([25, 75], calibrated=True, capture_only=True)
+    last = capture.contexts[-1]
+    assert last.speeds[1].speed_mode == "rejected_position_jump"
+    assert last.positions[1].world_position_m is None
+    assert last.positions[1].physical_measurement_reason_codes == ("UNSTABLE_TRACK",)
 
 
 def test_pipeline_delayed_overtake_cancels_open_candidate() -> None:

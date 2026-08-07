@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.camera_motion import CameraMotionEstimator, CameraPoseValidator
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import Detector
 from app.events import EventArtifactWriter
 from app.lanes import LaneAssigner
+from app.models import PhysicalMeasurementPermission, RoadPosition, SpeedEstimate
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import OvertakingClearancePolicy
 from app.physical_measurements import PhysicalMeasurementPolicy
@@ -107,6 +108,9 @@ class TrafficAnalysisPipeline:
                 speeds = self._speed_estimator.update(
                     packet.timestamp_seconds, positions, physical_permission
                 )
+                positions = self._scrub_unstable_physical_positions(
+                    positions, speeds, physical_permission
+                )
                 traffic_context = self._traffic_context_analyzer.analyze(
                     packet.timestamp_seconds,
                     observations,
@@ -182,3 +186,36 @@ class TrafficAnalysisPipeline:
             review_candidates=self._event_writer.completed_count,
             cancelled_candidates=self._event_writer.cancelled_count,
         )
+
+    def _scrub_unstable_physical_positions(
+        self,
+        positions: dict[int, RoadPosition],
+        speeds: dict[int, SpeedEstimate],
+        physical_permission: PhysicalMeasurementPermission,
+    ) -> dict[int, RoadPosition]:
+        """Prevent tracker jumps from reaching meter-gap/history consumers."""
+
+        scrubbed = dict(positions)
+        unstable_modes = {"rejected_position_jump", "rejected_unreasonable_speed"}
+        for track_id, speed in speeds.items():
+            position = scrubbed.get(track_id)
+            if position is None or speed.speed_mode not in unstable_modes:
+                continue
+            track_permission = self._physical_measurement_policy.apply_track_stability(
+                physical_permission, track_stable=False
+            )
+            normalized = position.normalized_position
+            scrubbed[track_id] = replace(
+                position,
+                lateral=normalized[0] if normalized is not None else position.lateral,
+                longitudinal=(
+                    normalized[1] if normalized is not None else position.longitudinal
+                ),
+                coordinate_system="normalized_image",
+                calibrated=False,
+                world_position_m=None,
+                world_position_confidence=0.0,
+                physical_measurement_status=track_permission.status,
+                physical_measurement_reason_codes=track_permission.reason_codes,
+            )
+        return scrubbed

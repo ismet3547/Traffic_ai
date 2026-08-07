@@ -412,6 +412,45 @@ and `comparison_mode` is `forced_non_comparable`.
 
 No real-world accuracy claim should be made until a sufficiently diverse, independently annotated test set has been evaluated.
 
+## Real Dataset and Annotation
+
+Phase 4.2 adds a prediction-free, versioned human-ground-truth workflow under `app/dataset`. It is deliberately separate from model evaluation: raw human annotation has no `system_prediction`, `model_score`, or `candidate_reason` fields. **Model predictions must not be shown to annotators before ground truth is finalized.** Agreement between annotators is a property to measure, not an assumption.
+
+The planning target is 30–50 independent traffic clips totaling roughly 1–2 hours. This is neither a hard limit nor a claim that the dataset exists; see `data/benchmark/REAL_DATASET_STATUS.md` for the honest current count. Raw video remains git-ignored and should be collected only with documented permission. Intake records source provenance and rights, SHA-256 identity, byte size, duration, resolution, FPS, and filename. The tools process traffic behavior only: do not annotate faces, plates, drivers, or identity.
+
+The blinded workflow is:
+
+1. Register a permitted clip and assign its original recording/session/camera to a `source_group_id`.
+2. Tag scenarios without consulting model predictions and assign source groups—not neighboring clips—to development, validation, or test.
+3. Have annotators A and B label validation/test independently into separate files.
+4. Validate and lock both passes, then measure temporal event, label, boundary, and confidence agreement.
+5. Adjudicate every disagreement without overwriting either original. Unresolved cases remain `insufficient_evidence`.
+6. Lock final test adjudication, create a release manifest, and export approved ground truth into the Phase 4 benchmark schema.
+
+```powershell
+python -m app.tools.register_benchmark_video --video D:\licensed\highway_001.mp4 --video-id highway_001 --source-group-id session_001 --source-type user_provided --source-reference "owner delivery 2026-08-08" --acquisition-date 2026-08-08 --permission-status verified --benchmark-use-allowed --scenario-tag daylight --scenario-tag fixed_camera
+python -m app.tools.annotate_video --video D:\licensed\highway_001.mp4 --output annotation_work/highway_001/annotator_a.json --annotator-id annotator_a --video-id highway_001 --event-json event_a.json --lock
+python -m app.tools.validate_annotations --dataset-annotation annotation_work/highway_001/annotator_a.json
+python -m app.tools.compare_annotations annotation_work/highway_001/annotator_a.json annotation_work/highway_001/annotator_b.json --output annotation_work/highway_001/agreement.json
+python -m app.tools.adjudicate_annotations annotation_work/highway_001/annotator_a.json annotation_work/highway_001/annotator_b.json --adjudicator-id adjudicator_01 --decisions decisions.json --output annotation_work/highway_001/adjudicated.json --lock
+python -m app.tools.assign_dataset_splits --candidates split_candidates.json --output split_assignments.json --seed 42
+python -m app.tools.generate_dataset_coverage --annotations-dir annotation_work --agreements-dir agreements --output-dir release_work
+python -m app.tools.build_dataset_release --splits split_assignments.json --annotations-dir annotation_work/independent --adjudications-dir annotation_work/adjudicated --output release_work/dataset_release.json
+python -m app.tools.export_adjudicated_benchmark --adjudication annotation_work/highway_001/adjudicated.json --splits split_assignments.json --output data/benchmark/annotations/highway_001.json
+```
+
+The event helper accepts repeatable inline JSON or JSON-file inputs and provides a frame/timestamp-assisted CLI workflow; use the existing frame extractor and a media player for frame stepping and seeking. Label definitions, boundary rules, evidence semantics, confidence levels, hard cases, and adjudication are normative in `docs/annotation_handbook.md`.
+
+Exact duplicate bytes are detected by SHA-256. Cropped, transcoded, or neighboring clips require manual source grouping. Splitting prioritizes isolation over perfect balance. Coverage reports expose actual imbalance. Release manifests use `pilot-0.1` and carry source/annotation hashes, protocol versions, permissions, splits, and adjudication state. Quality gates require verified identity/provenance, double annotation and adjudication for validation/test, and locked test truth. Optional agreement thresholds apply only when configured. Protocol drift fails validation and requires explicit migration or re-annotation.
+
+Run the complete explicitly synthetic lifecycle without real footage:
+
+```powershell
+python -m app.tools.run_synthetic_annotation_lifecycle --output benchmark_output/phase42_lifecycle
+```
+
+These generated artifacts are test-only and make no real-human-annotation claim.
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:

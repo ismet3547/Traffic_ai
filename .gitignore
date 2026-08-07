@@ -9,4 +9,6 @@ output/*
 benchmark_output/
 data/benchmark/videos/*
 !data/benchmark/videos/.gitkeep
+data/benchmark/raw/*
+data/benchmark/raw_videos/*
 *.pt

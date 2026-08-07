@@ -1,0 +1,20 @@
+{
+  "agreement_statistics": {
+    "mean_event_detection_agreement": null,
+    "mean_label_agreement": null,
+    "mean_temporal_boundary_agreement": null,
+    "report_count": 0,
+    "total_disagreements": 0
+  },
+  "camera_configuration_distribution": {},
+  "confidence_counts": {},
+  "day_night_distribution": {},
+  "labels": [],
+  "label_counts": {},
+  "scenario_tag_counts": {},
+  "split_counts": {},
+  "total_clips": 0,
+  "total_duration_seconds": 0.0,
+  "traffic_density_distribution": {},
+  "vehicle_class_distribution": {}
+}

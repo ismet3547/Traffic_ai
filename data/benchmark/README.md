@@ -1,5 +1,7 @@
 # Benchmark data layout
 
+Phase 4.2 real-dataset metadata includes `intake_registry.json`, `dataset_release.json`, both dataset coverage formats, and `REAL_DATASET_STATUS.md`. These record provenance, hashes, permissions, protocol versions, real counts, splits, and quality gates without committing raw video. Independent annotation work remains separate and only approved adjudication enters validation/test benchmark ground truth. See `docs/annotation_handbook.md`.
+
 Keep annotation JSON and manifest YAML in Git; keep large or third-party videos out of Git unless their redistribution rights are explicit.
 
 ```text

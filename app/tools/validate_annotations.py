@@ -22,6 +22,7 @@ from app.benchmark.models import (
     DurationValidationConfig,
     PredictionDocument,
 )
+from app.dataset.io import load_annotation as load_dataset_annotation
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--manifest")
     group.add_argument("--annotation", nargs="+")
+    group.add_argument(
+        "--dataset-annotation",
+        nargs="+",
+        help="Validate Phase 4.2 prediction-free annotation documents and locks.",
+    )
     parser.add_argument(
         "--video", help="Optional video for standalone duration validation"
     )
@@ -88,6 +94,19 @@ def main(argv: list[str] | None = None) -> int:
             checked = sum(video.enabled for video in manifest.videos)
         except (FileNotFoundError, RuntimeError, ValueError) as exc:
             errors.append(str(exc))
+    elif args.dataset_annotation:
+        for value in args.dataset_annotation:
+            try:
+                dataset_document = load_dataset_annotation(value)
+                checked += 1
+                if args.video:
+                    actual = probe_video_duration(args.video)
+                    if abs(actual - dataset_document.video_duration_seconds) > 1.0:
+                        errors.append(
+                            f"{value}: annotation/video duration differs by more than 1 second"
+                        )
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                errors.append(f"{value}: {exc}")
     else:
         video_duration_seconds: float | None = None
         if args.video:

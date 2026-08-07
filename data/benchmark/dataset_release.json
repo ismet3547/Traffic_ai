@@ -1,0 +1,19 @@
+{
+  "created_at": "2026-08-08T00:00:00Z",
+  "dataset_version": "pilot-0.1",
+  "handbook_version": "1.0",
+  "notes": [
+    "Empty initial real-dataset manifest; no real footage or annotations are claimed."
+  ],
+  "ontology_version": "pilot-1",
+  "quality_gate_passed": false,
+  "quality_gates": [
+    {
+      "details": "clips=0",
+      "gate": "dataset_has_registered_clips",
+      "passed": false
+    }
+  ],
+  "schema_version": "1.0",
+  "videos": []
+}

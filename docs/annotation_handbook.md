@@ -124,6 +124,18 @@ Occlusion, poor resolution, night glare, lane-boundary proximity, stopped vehicl
 
 Two annotators receive the same raw clip and handbook but separate output locations and anonymous IDs. They do not see each other's labels. Each pass is validated and locked before comparison. Agreement uses one-to-one temporal event matching, vehicle reference when configured, and configurable temporal IoU/boundary tolerance; exact timestamps are not required. Event, label, boundary, confidence, vehicle-reference, and visibility disagreements remain separate diagnostics. Cohen's kappa, when reported, applies only to matched event-label pairs.
 
+### Agreement provenance
+
+An agreement report belongs to one exact source video and two exact locked annotation revisions. It records the source SHA-256, both anonymous annotator IDs, both canonical annotation content hashes, ontology and handbook versions, agreement protocol version, deterministic pair identity, and report content hash. The annotation revision hash includes lock metadata and audited override history but not the JSON file's filesystem path. Any annotation edit and relock requires agreement to be recomputed.
+
+The A/B pair identity is order-independent. Supplying the same report twice, or supplying both A/B and B/A orientations, is a release error rather than extra evidence. Validation/test release also requires the agreement hashes to match the two original annotation hashes embedded in adjudication.
+
+Agreement quality is a macro average over exactly one provenance-validated current report per validation/test video. Reports for unknown clips, stale revisions, different sources or protocols, and incomplete report subsets cannot enter the calculation. If both passes contain zero events, event-detection agreement is `1.0`, matched-event label/boundary/confidence agreement is `0.0`, and temporal IoU is unavailable.
+
+**A high agreement score is meaningless if it was computed from different annotation revisions than the ground truth being released.**
+
+**Agreement quality is calculated only from provenance-validated reports for the exact release set.**
+
 An adjudicator reviews human disagreement, not model output. The artifact embeds both original locked annotations, the agreement report, an explicit decision for every disagreement, rationale, confidence, and final events. It never overwrites originals. Outcomes are agree, resolved to A, resolved to B, new consensus, or remains ambiguous. Remaining ambiguity must export as `insufficient_evidence`; consensus is never forced.
 
 ## Versioning, locking, and drift

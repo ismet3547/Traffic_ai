@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from app.benchmark.models import DatasetSplit
+from app.dataset.agreement_integrity import validate_release_agreements
 from app.dataset.io import (
     adjudication_content_hash,
     annotation_content_hash,
@@ -14,6 +15,7 @@ from app.dataset.models import (
     HANDBOOK_VERSION,
     ONTOLOGY_VERSION,
     AdjudicationArtifact,
+    AgreementReport,
     ArtifactIntegrityResult,
     DatasetAnnotation,
     DatasetReleaseIntegrityReport,
@@ -304,6 +306,7 @@ def validate_release_integrity(
     split_assignments: SplitAssignmentDocument,
     annotations: dict[str, list[DatasetAnnotation]],
     adjudications: dict[str, AdjudicationArtifact],
+    agreements: list[AgreementReport] | None = None,
 ) -> DatasetReleaseIntegrityReport:
     issues: list[IntegrityIssue] = []
     records = {item.video_id: item for item in registry.videos}
@@ -490,6 +493,15 @@ def validate_release_integrity(
                     )
                 )
 
+    agreement_validation = validate_release_agreements(
+        registry,
+        split_assignments,
+        annotations,
+        adjudications,
+        agreements or [],
+    )
+    issues.extend(agreement_validation.issues)
+
     issues = _deduplicate_issues(issues)
     gates = _integrity_gates(issues, bool(records))
     reason_codes = sorted(
@@ -534,6 +546,8 @@ def raise_for_release_integrity(report: DatasetReleaseIntegrityReport) -> None:
             IntegrityReasonCode.ADJUDICATION_VIDEO_ID_MISMATCH,
             IntegrityReasonCode.ADJUDICATION_SOURCE_VIDEO_MISMATCH,
             IntegrityReasonCode.ADJUDICATION_SOURCE_SIZE_MISMATCH,
+            IntegrityReasonCode.AGREEMENT_SOURCE_VIDEO_MISMATCH,
+            IntegrityReasonCode.AGREEMENT_SOURCE_SIZE_MISMATCH,
         }
     ):
         raise SourceIdentityMismatchError(report)
@@ -591,6 +605,20 @@ def _integrity_gates(
         IntegrityReasonCode.ADJUDICATION_SCHEMA_INVALID,
         IntegrityReasonCode.ADJUDICATION_CONTENT_HASH_MISMATCH,
     }
+    agreement_codes = {
+        IntegrityReasonCode.AGREEMENT_REPORT_UNKNOWN_VIDEO,
+        IntegrityReasonCode.DUPLICATE_AGREEMENT_REPORT,
+        IntegrityReasonCode.STALE_AGREEMENT_REPORT,
+        IntegrityReasonCode.AGREEMENT_SOURCE_VIDEO_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_SOURCE_SIZE_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_ANNOTATOR_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_PROTOCOL_UNSUPPORTED,
+        IntegrityReasonCode.AGREEMENT_ONTOLOGY_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_HANDBOOK_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_INTERNAL_INCOHERENT,
+        IntegrityReasonCode.AGREEMENT_CONTENT_HASH_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_ADJUDICATION_REVISION_MISMATCH,
+    }
     return [
         QualityGateResult(
             gate="dataset_has_registered_clips",
@@ -626,6 +654,16 @@ def _integrity_gates(
             "adjudication_current",
             adjudication_codes,
             "adjudications are approved and reference current annotation revisions",
+        ),
+        gate(
+            "agreement_integrity",
+            agreement_codes,
+            "agreement reports match exact source, annotation, and adjudication revisions",
+        ),
+        gate(
+            "agreement_coverage_complete",
+            {IntegrityReasonCode.MISSING_CURRENT_AGREEMENT_REPORT},
+            "every validation/test clip has exactly one current agreement report",
         ),
         gate(
             "test_annotations_locked",

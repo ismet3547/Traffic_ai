@@ -431,11 +431,11 @@ The blinded workflow is:
 python -m app.tools.register_benchmark_video --video D:\licensed\highway_001.mp4 --video-id highway_001 --source-group-id session_001 --source-type user_provided --source-reference "owner delivery 2026-08-08" --acquisition-date 2026-08-08 --permission-status verified --benchmark-use-allowed --scenario-tag daylight --scenario-tag fixed_camera
 python -m app.tools.annotate_video --video D:\licensed\highway_001.mp4 --output annotation_work/highway_001/annotator_a.json --annotator-id annotator_a --video-id highway_001 --event-json event_a.json --lock
 python -m app.tools.validate_annotations --dataset-annotation annotation_work/highway_001/annotator_a.json
-python -m app.tools.compare_annotations annotation_work/highway_001/annotator_a.json annotation_work/highway_001/annotator_b.json --output annotation_work/highway_001/agreement.json
+python -m app.tools.compare_annotations annotation_work/highway_001/annotator_a.json annotation_work/highway_001/annotator_b.json --output agreement_work/highway_001.json
 python -m app.tools.adjudicate_annotations annotation_work/highway_001/annotator_a.json annotation_work/highway_001/annotator_b.json --adjudicator-id adjudicator_01 --decisions decisions.json --output annotation_work/highway_001/adjudicated.json --lock
 python -m app.tools.assign_dataset_splits --candidates split_candidates.json --output split_assignments.json --seed 42
-python -m app.tools.generate_dataset_coverage --annotations-dir annotation_work --agreements-dir agreements --output-dir release_work
-python -m app.tools.build_dataset_release --splits split_assignments.json --annotations-dir annotation_work/independent --adjudications-dir annotation_work/adjudicated --output release_work/dataset_release.json
+python -m app.tools.generate_dataset_coverage --annotations-dir annotation_work --agreements-dir agreement_work --output-dir release_work
+python -m app.tools.build_dataset_release --splits split_assignments.json --annotations-dir annotation_work/independent --adjudications-dir annotation_work/adjudicated --agreements-dir agreement_work --output release_work/dataset_release.json
 python -m app.tools.export_adjudicated_benchmark --adjudication annotation_work/highway_001/adjudicated.json --annotations-dir annotation_work/highway_001 --splits split_assignments.json --release release_work/dataset_release.json --output data/benchmark/annotations/highway_001.json
 ```
 
@@ -470,6 +470,30 @@ python -m app.tools.run_release_integrity_scenarios --output benchmark_output/ph
 ```
 
 They cover a valid release, perfect agreement on the wrong source SHA, manually leaked source groups, duplicate bytes across splits, and stale adjudication. Only the valid scenario writes a release.
+
+### Agreement Provenance
+
+Agreement protocol `1` binds every report to the registry video ID, source-video SHA-256 and available byte size, both anonymous annotator IDs, and the canonical content SHA-256 of both exact annotation revisions. The deterministic `agreement_id` normalizes A/B order, so copied or reversed reports cannot reweight a release. The report also has its own content hash and records the ontology and handbook versions used by each input.
+
+This provenance addition moves adjudication and dataset-release schemas from `1.1` to `1.2` and introduces agreement-report schema `1.0`. Regenerate older agreement, adjudication, and release artifacts from the locked source annotations; legacy score-only reports are intentionally not migrated or trusted.
+
+The canonical annotation revision hash uses the same full-document semantics as adjudication stale-revision checks. It is independent of the annotation JSON file's filesystem path, but intentionally includes document metadata such as lock state, lock timestamp, annotation hash, and audited override history. Consequently, changing and relocking an annotation invalidates its old agreement report even when the event metrics happen to stay unchanged.
+
+Official validation/test release construction requires exactly one current, provenance-validated report for every eligible video. It reproduces the metrics from the bound annotations, requires the report and adjudication to reference the same revisions, rejects unknown, stale, unsupported, or duplicate reports, and only then calculates quality. Unrelated reports cannot enter the average, and missing reports cannot be hidden by averaging a convenient subset. Development clips do not require agreement, although any supplied development report must still validate.
+
+Dataset agreement uses a macro average per video. A clip with many events therefore cannot silently dominate the release score. When both annotators record zero events, event-detection agreement is explicitly `1.0`; matched-event label, boundary, and confidence agreement are `0.0`, and mean temporal IoU is unavailable. Zero-event clips remain in the macro denominator with these documented semantics.
+
+**A high agreement score is meaningless if it was computed from different annotation revisions than the ground truth being released.**
+
+**Agreement quality is calculated only from provenance-validated reports for the exact release set.**
+
+Run the Phase 4.2.2 provenance scenarios:
+
+```powershell
+python -m app.tools.run_agreement_integrity_scenarios --output benchmark_output/phase422_agreement_integrity
+```
+
+They exercise a valid current report, unrelated perfect-report injection, duplicate weighting, a stale report after annotation editing, and an agreement/adjudication revision mismatch. Failed cases do not write release manifests.
 
 ## Tests and checks
 

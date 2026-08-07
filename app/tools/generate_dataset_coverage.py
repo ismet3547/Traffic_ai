@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from app.dataset.io import load_annotation, load_registry, read_json_model
-from app.dataset.models import AgreementReport
+from app.dataset.io import load_agreement, load_annotation, load_registry
 from app.dataset.reporting import build_coverage_report, write_coverage_report
 
 
@@ -24,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     agreements = []
     if args.agreements_dir:
         agreements = [
-            read_json_model(path, AgreementReport)
+            load_agreement(path)
             for path in sorted(Path(args.agreements_dir).rglob("*.json"))
         ]
     report = build_coverage_report(

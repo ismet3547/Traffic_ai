@@ -2,6 +2,24 @@
   "created_at": "2026-08-08T00:00:00Z",
   "dataset_version": "pilot-0.1",
   "handbook_version": "1.0",
+  "agreement_coverage": {
+    "coverage_ratio": 1.0,
+    "duplicate_report_count": 0,
+    "missing_report_count": 0,
+    "required_video_count": 0,
+    "stale_report_count": 0,
+    "unknown_report_count": 0,
+    "validated_report_count": 0
+  },
+  "agreement_quality": {
+    "aggregation_mode": "macro_per_video",
+    "confidence_agreement": null,
+    "event_detection_agreement": null,
+    "label_agreement": null,
+    "temporal_boundary_agreement": null,
+    "thresholds_passed": true,
+    "validated_report_count": 0
+  },
   "integrity_report": {
     "affected_source_group_ids": [],
     "affected_video_ids": [],
@@ -12,6 +30,8 @@
       {"details": "source groups and byte-identical videos do not cross splits", "gate": "split_group_isolation_valid", "passed": true},
       {"details": "validation/test double annotations are locked and identity-valid", "gate": "double_annotation_valid", "passed": true},
       {"details": "adjudications are approved and reference current annotation revisions", "gate": "adjudication_current", "passed": true},
+      {"details": "agreement reports match exact source, annotation, and adjudication revisions", "gate": "agreement_integrity", "passed": true},
+      {"details": "every validation/test clip has exactly one current agreement report", "gate": "agreement_coverage_complete", "passed": true},
       {"details": "test adjudications are locked", "gate": "test_annotations_locked", "passed": true},
       {"details": "all source video identities are verified", "gate": "source_video_identity_verified", "passed": true},
       {"details": "all released annotations use the current ontology and handbook", "gate": "ontology_compatible", "passed": true},
@@ -33,6 +53,6 @@
     {"details": "no clips registered", "gate": "dataset_has_registered_clips", "passed": false},
     {"details": "1 integrity blocker(s) detected", "gate": "release_artifacts_validated", "passed": false}
   ],
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "videos": []
 }

@@ -10,6 +10,12 @@ Perfect annotator agreement does not make ground truth valid if both annotators 
 
 A split assignment is not trusted merely because it was produced by the official split tool; release-time leakage checks are mandatory.
 
+## Agreement Provenance
+
+Every validation/test clip requires exactly one agreement report bound to the current source-video SHA-256, current A/B annotation content hashes, ontology, handbook, and agreement protocol. Agreement and adjudication must reference the same annotation revisions. Unknown, stale, duplicated, or reversed-pair duplicate reports fail official release construction and cannot affect quality averages.
+
+Dataset agreement is macro-averaged per video only after complete provenance validation. **A high agreement score is meaningless if it was computed from different annotation revisions than the ground truth being released. Agreement quality is calculated only from provenance-validated reports for the exact release set.**
+
 Keep annotation JSON and manifest YAML in Git; keep large or third-party videos out of Git unless their redistribution rights are explicit.
 
 ```text

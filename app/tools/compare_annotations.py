@@ -29,8 +29,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_json_model(report, args.output)
     print(
-        f"matched={report.matched_event_count} event_agreement={report.event_detection_agreement:.3f} "
-        f"label_agreement={report.label_agreement:.3f} disagreements={report.disagreement_count}"
+        f"video_id={report.video_id} source_sha={report.source_video_sha256[:12]} "
+        f"annotation_a_sha={report.annotation_a_content_sha256[:12]} "
+        f"annotation_b_sha={report.annotation_b_content_sha256[:12]} "
+        f"protocol={report.agreement_protocol_version} "
+        f"agreement_id={report.agreement_id[:12]} "
+        f"matched={report.matched_event_count} "
+        f"event_agreement={report.event_detection_agreement:.3f} "
+        f"label_agreement={report.label_agreement:.3f} "
+        f"disagreements={report.disagreement_count}"
     )
     return 0
 

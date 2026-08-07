@@ -8,6 +8,7 @@ from pathlib import Path
 from app.dataset.integrity import DatasetIntegrityError
 from app.dataset.io import (
     load_adjudication,
+    load_agreement,
     load_annotation,
     load_registry,
     read_json_model,
@@ -23,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--splits", required=True)
     parser.add_argument("--annotations-dir", required=True)
     parser.add_argument("--adjudications-dir", required=True)
+    parser.add_argument(
+        "--agreements-dir",
+        help="directory containing provenance-bound agreement reports",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--minimum-label-agreement", type=float)
     parser.add_argument("--minimum-event-match-rate", type=float)
@@ -39,12 +44,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"duplicate adjudication artifacts for {artifact.video_id}"
             )
         adjudications[artifact.video_id] = artifact
+    agreements = []
+    if args.agreements_dir:
+        agreements = [
+            load_agreement(path)
+            for path in sorted(Path(args.agreements_dir).rglob("*.json"))
+        ]
     try:
         release = build_dataset_release(
             load_registry(args.registry),
             read_json_model(args.splits, SplitAssignmentDocument),
             annotations,
             adjudications,
+            agreements=agreements,
             quality_config=AnnotationQualityConfig(
                 minimum_label_agreement=args.minimum_label_agreement,
                 minimum_event_match_rate=args.minimum_event_match_rate,

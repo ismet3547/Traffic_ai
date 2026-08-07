@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 from statistics import mean
 
+from app.dataset.agreement_integrity import validate_supplied_agreements
 from app.dataset.io import write_json_model
 from app.dataset.models import (
     AgreementReport,
@@ -51,7 +52,9 @@ def build_coverage_report(
                 confidences[event.confidence.value] += 1
                 if event.evidence.vehicle_class is not None:
                     vehicle_classes[event.evidence.vehicle_class.value] += 1
-    agreement_values = agreements or []
+    agreement_values = validate_supplied_agreements(
+        registry, annotations, agreements or []
+    )
     agreement_statistics: dict[str, float | int | None] = {
         "report_count": len(agreement_values),
         "mean_event_detection_agreement": (

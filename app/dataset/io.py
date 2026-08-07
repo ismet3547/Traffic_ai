@@ -16,6 +16,7 @@ from app.dataset.models import (
     HANDBOOK_VERSION,
     ONTOLOGY_VERSION,
     AdjudicationArtifact,
+    AgreementReport,
     DatasetAnnotation,
     IntakeRegistry,
     LockOverrideRecord,
@@ -100,6 +101,13 @@ def load_adjudication(path: str | Path) -> AdjudicationArtifact:
     return artifact
 
 
+def load_agreement(path: str | Path) -> AgreementReport:
+    report = read_json_model(path, AgreementReport)
+    if report.agreement_content_sha256 != agreement_report_content_hash(report):
+        raise ValueError("AGREEMENT_CONTENT_HASH_MISMATCH")
+    return report
+
+
 def validate_annotation_protocol(document: DatasetAnnotation) -> None:
     if document.ontology_version != ONTOLOGY_VERSION:
         raise ValueError(
@@ -124,6 +132,12 @@ def annotation_content_hash(document: DatasetAnnotation) -> str:
 def adjudication_content_hash(document: AdjudicationArtifact) -> str:
     return canonical_sha256(
         document.model_dump(mode="json", exclude={"adjudication_hash"})
+    )
+
+
+def agreement_report_content_hash(document: AgreementReport) -> str:
+    return canonical_sha256(
+        document.model_dump(mode="json", exclude={"agreement_content_sha256"})
     )
 
 

@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
+from app.benchmark.fingerprints import canonical_sha256
 from app.benchmark.matcher import match_events, temporal_iou
 from app.benchmark.models import MatchingConfig
+from app.dataset.io import agreement_report_content_hash, document_sha256
 from app.dataset.models import (
+    AGREEMENT_PROTOCOL_VERSION,
     AgreementConfig,
     AgreementMatch,
     AgreementReport,
@@ -135,10 +138,30 @@ def compare_independent_annotations(
     event_detection_agreement = (
         2 * matched / detection_denominator if detection_denominator else 1.0
     )
-    return AgreementReport(
+    hash_a = document_sha256(first)
+    hash_b = document_sha256(second)
+    agreement_id = agreement_pair_id(first, second)
+    report = AgreementReport(
+        agreement_protocol_version=AGREEMENT_PROTOCOL_VERSION,
+        agreement_id=agreement_id,
+        agreement_content_sha256="0" * 64,
         video_id=first.video_id,
-        annotator_a=first.annotator_id,
-        annotator_b=second.annotator_id,
+        source_video_sha256=first.source_video_sha256,
+        source_video_size_bytes=(
+            first.source_video_size_bytes
+            if first.source_video_size_bytes is not None
+            else second.source_video_size_bytes
+        ),
+        annotator_a_id=first.annotator_id,
+        annotator_b_id=second.annotator_id,
+        annotation_a_content_sha256=hash_a,
+        annotation_b_content_sha256=hash_b,
+        annotation_a_ontology_version=first.ontology_version,
+        annotation_b_ontology_version=second.ontology_version,
+        annotation_a_handbook_version=first.handbook_version,
+        annotation_b_handbook_version=second.handbook_version,
+        annotation_a_event_count=len(first.events),
+        annotation_b_event_count=len(second.events),
         config=active,
         matched_event_count=matched,
         event_detection_agreement=event_detection_agreement,
@@ -172,8 +195,40 @@ def compare_independent_annotations(
         caveat=(
             "Cohen's kappa uses only one-to-one temporally matched event pairs. "
             "Unmatched events and boundary disagreements are reported separately; "
-            "no arbitrary frame-level negatives are invented."
+            "no arbitrary frame-level negatives are invented. When both annotators "
+            "record zero events, event detection agreement is explicitly 1.0 while "
+            "matched-event label, boundary, and confidence agreement are 0.0."
         ),
+    )
+    return report.model_copy(
+        update={"agreement_content_sha256": agreement_report_content_hash(report)}
+    )
+
+
+def agreement_pair_id(
+    first: DatasetAnnotation,
+    second: DatasetAnnotation,
+) -> str:
+    pair_identity = sorted(
+        (
+            {
+                "annotator_id": first.annotator_id,
+                "annotation_sha256": document_sha256(first),
+            },
+            {
+                "annotator_id": second.annotator_id,
+                "annotation_sha256": document_sha256(second),
+            },
+        ),
+        key=lambda item: (item["annotator_id"], item["annotation_sha256"]),
+    )
+    return canonical_sha256(
+        {
+            "video_id": first.video_id,
+            "source_video_sha256": first.source_video_sha256,
+            "annotation_pair": pair_identity,
+            "agreement_protocol_version": AGREEMENT_PROTOCOL_VERSION,
+        }
     )
 
 

@@ -165,6 +165,7 @@ def test_release_contains_source_and_annotation_hashes() -> None:
         split_document(),
         {"clip": [first, second]},
         {"clip": adjudicated},
+        agreements=[adjudicated.agreement_report],
         created_at=NOW,
     )
     item = release.videos[0]

@@ -12,6 +12,7 @@ from app.dataset.adjudication import create_adjudication, lock_adjudication
 from app.dataset.integrity import DatasetIntegrityError
 from app.dataset.io import lock_annotation, write_json_model
 from app.dataset.models import (
+    AgreementReport,
     DatasetAnnotation,
     DatasetEvent,
     DatasetLabel,
@@ -116,6 +117,7 @@ def _run(
     split_document: SplitAssignmentDocument,
     annotations: dict[str, list[DatasetAnnotation]],
     adjudications: dict,
+    agreements: list[AgreementReport] | None = None,
 ) -> IntegrityScenarioOutcome:
     destination = output / name / "dataset_release.json"
     reason_codes = []
@@ -125,6 +127,7 @@ def _run(
             split_document,
             annotations,
             adjudications,
+            agreements=agreements or [],
             created_at=NOW,
         )
         write_json_model(release, destination)
@@ -173,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             _splits(("clip", "session", DatasetSplit.TEST)),
             {"clip": [first, second]},
             {"clip": artifact},
+            [artifact.agreement_report],
         ),
         _run(
             "wrong_source_sha_perfect_agreement",
@@ -182,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             _splits(("clip", "session", DatasetSplit.TEST)),
             {"clip": [wrong_a, wrong_b]},
             {"clip": wrong_artifact},
+            [wrong_artifact.agreement_report],
         ),
         _run(
             "manual_source_group_leakage",
@@ -220,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             _splits(("clip", "session", DatasetSplit.TEST)),
             {"clip": [first, revised_b]},
             {"clip": artifact},
+            [artifact.agreement_report],
         ),
     ]
     summary = IntegrityScenarioSummary(

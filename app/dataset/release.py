@@ -11,6 +11,7 @@ from app.benchmark.models import (
     DatasetSplit,
     GroundTruthEvent,
 )
+from app.dataset.agreement_integrity import validate_release_agreements
 from app.dataset.integrity import (
     DatasetIntegrityError,
     raise_for_release_integrity,
@@ -24,6 +25,7 @@ from app.dataset.models import (
     ONTOLOGY_VERSION,
     AdjudicationArtifact,
     AdjudicationOutcome,
+    AgreementQualitySummary,
     AgreementReport,
     AnnotationQualityConfig,
     DatasetAnnotation,
@@ -34,8 +36,10 @@ from app.dataset.models import (
     IntegrityIssue,
     IntegrityReasonCode,
     QualityGateResult,
+    ReleaseAgreementProvenance,
     ReleaseVideo,
     SplitAssignmentDocument,
+    ValidatedAgreementSet,
     VideoIntakeRecord,
 )
 
@@ -62,10 +66,25 @@ def build_dataset_release(
     created_at: datetime | None = None,
 ) -> DatasetRelease:
     """Validate the complete trust boundary before constructing a release."""
+    supplied_agreements = agreements or []
     integrity = validate_release_integrity(
-        registry, split_assignments, annotations, adjudications
+        registry,
+        split_assignments,
+        annotations,
+        adjudications,
+        supplied_agreements,
     )
     raise_for_release_integrity(integrity)
+    agreement_validation = validate_release_agreements(
+        registry,
+        split_assignments,
+        annotations,
+        adjudications,
+        supplied_agreements,
+    )
+    validated_agreement_by_video = {
+        item.video_id: item for item in agreement_validation.reports
+    }
     split_by_video = {
         item.video_id: item.split for item in split_assignments.assignments
     }
@@ -96,6 +115,7 @@ def build_dataset_release(
         else:
             status = "not_required"
             ground_truth_hash = None
+        agreement = validated_agreement_by_video.get(record.video_id)
         videos.append(
             ReleaseVideo(
                 video_id=record.video_id,
@@ -114,6 +134,23 @@ def build_dataset_release(
                 benchmark_ground_truth_sha256=ground_truth_hash,
                 double_annotated=double.valid,
                 double_annotation=double,
+                agreement_provenance=(
+                    ReleaseAgreementProvenance(
+                        agreement_id=agreement.agreement_id,
+                        agreement_content_sha256=(agreement.agreement_content_sha256),
+                        agreement_protocol_version=(
+                            agreement.agreement_protocol_version
+                        ),
+                        annotation_content_sha256=sorted(
+                            [
+                                agreement.annotation_a_content_sha256,
+                                agreement.annotation_b_content_sha256,
+                            ]
+                        ),
+                    )
+                    if agreement is not None
+                    else None
+                ),
                 adjudication_status=status,
                 test_annotation_locked=bool(
                     adjudication is not None and adjudication.locked
@@ -123,8 +160,9 @@ def build_dataset_release(
                 benchmark_use_allowed=record.benchmark_use_allowed,
             )
         )
-    threshold_gates = evaluate_agreement_thresholds(
-        agreements or [], quality_config or AnnotationQualityConfig()
+    agreement_quality, threshold_gates = _summarize_validated_agreement_quality(
+        agreement_validation,
+        quality_config or AnnotationQualityConfig(),
     )
     gates = [*integrity.gates, *threshold_gates]
     return DatasetRelease(
@@ -132,27 +170,39 @@ def build_dataset_release(
         created_at=created_at or datetime.now(timezone.utc),
         videos=videos,
         integrity_report=integrity,
+        agreement_coverage=agreement_validation.coverage,
+        agreement_quality=agreement_quality,
         quality_gates=gates,
         quality_gate_passed=all(item.passed for item in gates),
         notes=[
             "No production accuracy requirement is implied by annotation quality gates.",
             "Near-duplicate edited/cropped clips require manual source-group review.",
             "Release integrity was revalidated independently of intake, annotation, adjudication, and split tooling.",
+            "Agreement quality uses a macro average per video over only provenance-validated reports for the exact release set.",
         ],
     )
 
 
-def evaluate_agreement_thresholds(
-    agreements: list[AgreementReport],
+def _summarize_validated_agreement_quality(
+    validation: ValidatedAgreementSet,
     config: AnnotationQualityConfig,
-) -> list[QualityGateResult]:
+) -> tuple[AgreementQualitySummary, list[QualityGateResult]]:
+    """Macro-average one validated report per release video."""
+    agreements = validation.reports
+    count = len(agreements)
+
+    def mean(field: str) -> float | None:
+        if not agreements:
+            return None
+        return sum(float(getattr(item, field)) for item in agreements) / count
+
+    label_agreement = mean("label_agreement")
+    event_agreement = mean("event_detection_agreement")
+    boundary_agreement = mean("temporal_boundary_agreement")
+    confidence_agreement = mean("confidence_agreement")
     gates: list[QualityGateResult] = []
     if config.minimum_label_agreement is not None:
-        actual = (
-            sum(item.label_agreement for item in agreements) / len(agreements)
-            if agreements
-            else 0.0
-        )
+        actual = label_agreement if label_agreement is not None else 0.0
         gates.append(
             _gate(
                 "minimum_label_agreement",
@@ -161,11 +211,7 @@ def evaluate_agreement_thresholds(
             )
         )
     if config.minimum_event_match_rate is not None:
-        actual = (
-            sum(item.event_detection_agreement for item in agreements) / len(agreements)
-            if agreements
-            else 0.0
-        )
+        actual = event_agreement if event_agreement is not None else 0.0
         gates.append(
             _gate(
                 "minimum_event_match_rate",
@@ -173,7 +219,18 @@ def evaluate_agreement_thresholds(
                 f"actual={actual:.6f}, threshold={config.minimum_event_match_rate:.6f}",
             )
         )
-    return gates
+    thresholds_passed = all(item.passed for item in gates)
+    return (
+        AgreementQualitySummary(
+            validated_report_count=count,
+            label_agreement=label_agreement,
+            event_detection_agreement=event_agreement,
+            temporal_boundary_agreement=boundary_agreement,
+            confidence_agreement=confidence_agreement,
+            thresholds_passed=thresholds_passed,
+        ),
+        gates,
+    )
 
 
 def export_adjudicated_annotation(

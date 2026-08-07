@@ -268,6 +268,7 @@ def test_export_cli_wrong_source_fails_without_writing_output(
         split_document,
         {"clip": [first, second]},
         {"clip": artifact},
+        agreements=[artifact.agreement_report],
         created_at=NOW,
     )
     wrong_a = annotation("annotator_a", "event_a", sha=BBB)
@@ -471,6 +472,7 @@ def test_all_integrity_gates_valid_produces_release() -> None:
         split_document,
         {"clip": [first, second]},
         {"clip": artifact},
+        agreements=[artifact.agreement_report],
         created_at=NOW,
     )
     assert release.quality_gate_passed
@@ -518,6 +520,7 @@ def test_release_manifest_preserves_exact_video_and_ground_truth_hashes() -> Non
         split_document,
         {"clip": [first, second]},
         {"clip": artifact},
+        agreements=[artifact.agreement_report],
         created_at=NOW,
     )
     entry = release.videos[0]
@@ -545,8 +548,12 @@ def test_release_build_is_deterministic() -> None:
         {"clip": [first, second]},
         {"clip": artifact},
     )
-    first_release = build_dataset_release(*arguments, created_at=NOW)
-    second_release = build_dataset_release(*arguments, created_at=NOW)
+    first_release = build_dataset_release(
+        *arguments, agreements=[artifact.agreement_report], created_at=NOW
+    )
+    second_release = build_dataset_release(
+        *arguments, agreements=[artifact.agreement_report], created_at=NOW
+    )
     assert first_release.model_dump(mode="json") == second_release.model_dump(
         mode="json"
     )

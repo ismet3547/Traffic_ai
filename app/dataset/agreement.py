@@ -10,9 +10,13 @@ from app.benchmark.matcher import match_events, temporal_iou
 from app.benchmark.models import MatchingConfig
 from app.dataset.io import agreement_report_content_hash, document_sha256
 from app.dataset.models import (
+    AGREEMENT_CONFIG_VERSION,
     AGREEMENT_PROTOCOL_VERSION,
+    CANONICAL_AGREEMENT_CONFIG,
+    CANONICAL_AGREEMENT_CONFIG_FINGERPRINT,
     AgreementConfig,
     AgreementMatch,
+    AgreementMode,
     AgreementReport,
     AnnotationDisagreement,
     DatasetAnnotation,
@@ -20,6 +24,7 @@ from app.dataset.models import (
     DatasetLabel,
     DisagreementType,
     VisibilityQuality,
+    agreement_config_fingerprint,
 )
 
 
@@ -29,14 +34,30 @@ class _AgreementTemporalEvent:
     start_seconds: float
     end_seconds: float
     vehicle_track_hint: str | None
+    track_id: str | None
 
 
 def compare_independent_annotations(
     first: DatasetAnnotation,
     second: DatasetAnnotation,
     config: AgreementConfig | None = None,
+    *,
+    mode: AgreementMode | None = None,
 ) -> AgreementReport:
-    active = config or AgreementConfig()
+    active_mode = mode or (
+        AgreementMode.OFFICIAL
+        if config is None or config == CANONICAL_AGREEMENT_CONFIG
+        else AgreementMode.EXPLORATORY
+    )
+    if active_mode == AgreementMode.OFFICIAL:
+        if config is not None and config != CANONICAL_AGREEMENT_CONFIG:
+            raise ValueError(
+                "official agreement requires the canonical agreement config"
+            )
+        active = CANONICAL_AGREEMENT_CONFIG
+    else:
+        active = config or CANONICAL_AGREEMENT_CONFIG
+    config_fingerprint = agreement_config_fingerprint(active)
     _validate_pair(first, second)
     first_events = [_temporal(event) for event in first.events]
     second_events = [_temporal(event) for event in second.events]
@@ -140,9 +161,16 @@ def compare_independent_annotations(
     )
     hash_a = document_sha256(first)
     hash_b = document_sha256(second)
-    agreement_id = agreement_pair_id(first, second)
+    agreement_id = agreement_pair_id(
+        first,
+        second,
+        config_fingerprint=config_fingerprint,
+    )
     report = AgreementReport(
+        agreement_mode=active_mode,
         agreement_protocol_version=AGREEMENT_PROTOCOL_VERSION,
+        agreement_config_version=AGREEMENT_CONFIG_VERSION,
+        agreement_config_fingerprint=config_fingerprint,
         agreement_id=agreement_id,
         agreement_content_sha256="0" * 64,
         video_id=first.video_id,
@@ -162,7 +190,7 @@ def compare_independent_annotations(
         annotation_b_handbook_version=second.handbook_version,
         annotation_a_event_count=len(first.events),
         annotation_b_event_count=len(second.events),
-        config=active,
+        agreement_config=active,
         matched_event_count=matched,
         event_detection_agreement=event_detection_agreement,
         label_agreement=(
@@ -197,7 +225,9 @@ def compare_independent_annotations(
             "Unmatched events and boundary disagreements are reported separately; "
             "no arbitrary frame-level negatives are invented. When both annotators "
             "record zero events, event detection agreement is explicitly 1.0 while "
-            "matched-event label, boundary, and confidence agreement are 0.0."
+            "matched-event label, boundary, and confidence agreement are 0.0. "
+            f"This is an {active_mode.value} report under agreement protocol "
+            f"{AGREEMENT_PROTOCOL_VERSION}, config version {AGREEMENT_CONFIG_VERSION}."
         ),
     )
     return report.model_copy(
@@ -208,6 +238,9 @@ def compare_independent_annotations(
 def agreement_pair_id(
     first: DatasetAnnotation,
     second: DatasetAnnotation,
+    *,
+    protocol_version: str = AGREEMENT_PROTOCOL_VERSION,
+    config_fingerprint: str = CANONICAL_AGREEMENT_CONFIG_FINGERPRINT,
 ) -> str:
     pair_identity = sorted(
         (
@@ -227,7 +260,8 @@ def agreement_pair_id(
             "video_id": first.video_id,
             "source_video_sha256": first.source_video_sha256,
             "annotation_pair": pair_identity,
-            "agreement_protocol_version": AGREEMENT_PROTOCOL_VERSION,
+            "agreement_protocol_version": protocol_version,
+            "agreement_config_fingerprint": config_fingerprint,
         }
     )
 
@@ -257,6 +291,7 @@ def _temporal(event: DatasetEvent) -> _AgreementTemporalEvent:
         start_seconds=event.start_seconds,
         end_seconds=event.end_seconds,
         vehicle_track_hint=event.vehicle_ref,
+        track_id=event.vehicle_ref,
     )
 
 

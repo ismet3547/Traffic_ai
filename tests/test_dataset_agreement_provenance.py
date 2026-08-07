@@ -330,7 +330,7 @@ def test_unsupported_agreement_protocol_is_rejected() -> None:
     record, first, second, report, _ = _bundle()
     wrong = _rehash(report, agreement_protocol_version="999")
     result = assess_agreement_report(record, first, second, wrong)
-    assert IntegrityReasonCode.AGREEMENT_PROTOCOL_UNSUPPORTED in result.reason_codes
+    assert IntegrityReasonCode.AGREEMENT_PROTOCOL_MISMATCH in result.reason_codes
     assert report.agreement_protocol_version == AGREEMENT_PROTOCOL_VERSION
 
 

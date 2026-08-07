@@ -15,6 +15,7 @@ from app.dataset.models import (
     AdjudicationDecision,
     AdjudicationOutcome,
     AgreementConfig,
+    AgreementMode,
     DatasetAnnotation,
 )
 
@@ -26,6 +27,7 @@ def create_adjudication(
     adjudicator_id: str,
     decisions: list[AdjudicationDecision],
     agreement_config: AgreementConfig | None = None,
+    agreement_mode: AgreementMode | None = None,
     created_at: datetime | None = None,
     approved: bool = True,
 ) -> AdjudicationArtifact:
@@ -35,7 +37,10 @@ def create_adjudication(
         if annotation.annotation_hash != annotation_content_hash(annotation):
             raise ValueError("locked annotation content hash is invalid")
     report = compare_independent_annotations(
-        annotation_a, annotation_b, agreement_config
+        annotation_a,
+        annotation_b,
+        agreement_config,
+        mode=agreement_mode,
     )
     event_a = {event.event_id: event for event in annotation_a.events}
     auto_decisions: list[AdjudicationDecision] = []

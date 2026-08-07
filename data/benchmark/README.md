@@ -16,6 +16,12 @@ Every validation/test clip requires exactly one agreement report bound to the cu
 
 Dataset agreement is macro-averaged per video only after complete provenance validation. **A high agreement score is meaningless if it was computed from different annotation revisions than the ground truth being released. Agreement quality is calculated only from provenance-validated reports for the exact release set.**
 
+## Canonical Agreement Protocol
+
+Official validation/test reports use protocol `2` and one config: temporal IoU `0.30`, boundary tolerance `1.0s`, and required vehicle-reference matching. Each report and release records config version `1`, the full config, and its deterministic fingerprint. Exploratory or mixed-config reports are excluded by failing release construction, not by averaging around them.
+
+**An agreement report cannot choose its own grading rules for an official dataset release. All validation/test agreement metrics in a release are computed under one canonical agreement protocol.** Release metadata separately reports zero-event clip count, positive-event clip count, overall macro event agreement, and positive-event macro event agreement.
+
 Keep annotation JSON and manifest YAML in Git; keep large or third-party videos out of Git unless their redistribution rights are explicit.
 
 ```text

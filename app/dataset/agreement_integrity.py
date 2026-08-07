@@ -8,11 +8,15 @@ from app.benchmark.models import DatasetSplit
 from app.dataset.agreement import agreement_pair_id, compare_independent_annotations
 from app.dataset.io import agreement_report_content_hash, document_sha256
 from app.dataset.models import (
+    AGREEMENT_CONFIG_VERSION,
     AGREEMENT_PROTOCOL_VERSION,
+    CANONICAL_AGREEMENT_CONFIG,
+    CANONICAL_AGREEMENT_CONFIG_FINGERPRINT,
     HANDBOOK_VERSION,
     ONTOLOGY_VERSION,
     AdjudicationArtifact,
     AgreementCoverage,
+    AgreementMode,
     AgreementReport,
     ArtifactIntegrityResult,
     DatasetAnnotation,
@@ -22,6 +26,7 @@ from app.dataset.models import (
     SplitAssignmentDocument,
     ValidatedAgreementSet,
     VideoIntakeRecord,
+    agreement_config_fingerprint,
 )
 
 
@@ -39,6 +44,7 @@ def assess_agreement_report(
     report: AgreementReport,
     *,
     adjudication: AdjudicationArtifact | None = None,
+    official_required: bool = True,
 ) -> ArtifactIntegrityResult:
     issues: list[IntegrityIssue] = []
     try:
@@ -81,11 +87,42 @@ def assess_agreement_report(
     if report.agreement_protocol_version != AGREEMENT_PROTOCOL_VERSION:
         issues.append(
             _issue(
-                IntegrityReasonCode.AGREEMENT_PROTOCOL_UNSUPPORTED,
-                "agreement protocol version is unsupported",
+                IntegrityReasonCode.AGREEMENT_PROTOCOL_MISMATCH,
+                "agreement protocol version is not the current canonical version",
                 intake_record,
             )
         )
+    actual_config_fingerprint = agreement_config_fingerprint(report.agreement_config)
+    if report.agreement_config_fingerprint != actual_config_fingerprint:
+        issues.append(
+            _issue(
+                IntegrityReasonCode.AGREEMENT_CONFIG_MISMATCH,
+                "agreement config fingerprint does not match its config fields",
+                intake_record,
+            )
+        )
+    if official_required:
+        if report.agreement_mode != AgreementMode.OFFICIAL:
+            issues.append(
+                _issue(
+                    IntegrityReasonCode.AGREEMENT_MODE_NOT_OFFICIAL,
+                    "validation/test agreement report is not official",
+                    intake_record,
+                )
+            )
+        if (
+            report.agreement_config_version != AGREEMENT_CONFIG_VERSION
+            or report.agreement_config_fingerprint
+            != CANONICAL_AGREEMENT_CONFIG_FINGERPRINT
+            or report.agreement_config != CANONICAL_AGREEMENT_CONFIG
+        ):
+            issues.append(
+                _issue(
+                    IntegrityReasonCode.AGREEMENT_CONFIG_MISMATCH,
+                    "agreement report does not use the canonical release config",
+                    intake_record,
+                )
+            )
     actual_by_annotator = {
         annotation_a.annotator_id: annotation_a,
         annotation_b.annotator_id: annotation_b,
@@ -151,7 +188,16 @@ def assess_agreement_report(
                 intake_record,
             )
         )
-    if report.agreement_id != agreement_pair_id(annotation_a, annotation_b):
+    expected_config = (
+        CANONICAL_AGREEMENT_CONFIG if official_required else report.agreement_config
+    )
+    expected_config_fingerprint = agreement_config_fingerprint(expected_config)
+    if report.agreement_id != agreement_pair_id(
+        annotation_a,
+        annotation_b,
+        protocol_version=AGREEMENT_PROTOCOL_VERSION,
+        config_fingerprint=expected_config_fingerprint,
+    ):
         issues.append(
             _issue(
                 IntegrityReasonCode.STALE_AGREEMENT_REPORT,
@@ -171,12 +217,15 @@ def assess_agreement_report(
         expected_report = compare_independent_annotations(
             annotation_a,
             annotation_b,
-            report.config,
+            expected_config,
+            mode=(
+                AgreementMode.OFFICIAL if official_required else report.agreement_mode
+            ),
         )
         metric_fields = {
             "annotation_a_event_count",
             "annotation_b_event_count",
-            "config",
+            "agreement_config",
             "matched_event_count",
             "event_detection_agreement",
             "label_agreement",
@@ -219,6 +268,18 @@ def assess_agreement_report(
                     intake_record,
                 )
             )
+        if (
+            report.agreement_id != adjudication.agreement_report.agreement_id
+            or report.agreement_content_sha256
+            != adjudication.agreement_report.agreement_content_sha256
+        ):
+            issues.append(
+                _issue(
+                    IntegrityReasonCode.AGREEMENT_ADJUDICATION_REPORT_MISMATCH,
+                    "release agreement differs from the report used for adjudication",
+                    intake_record,
+                )
+            )
     return _result(issues)
 
 
@@ -229,6 +290,7 @@ def validate_agreement_report(
     report: AgreementReport,
     *,
     adjudication: AdjudicationArtifact | None = None,
+    official_required: bool = True,
 ) -> ArtifactIntegrityResult:
     result = assess_agreement_report(
         intake_record,
@@ -236,6 +298,7 @@ def validate_agreement_report(
         annotation_b,
         report,
         adjudication=adjudication,
+        official_required=official_required,
     )
     if not result.valid:
         raise AgreementIntegrityError(result)
@@ -254,6 +317,7 @@ def validate_supplied_agreements(
         agreement_id for agreement_id, count in report_counts.items() if count > 1
     }
     issues: list[IntegrityIssue] = []
+    _append_mixed_protocol_issue(issues, reports)
     for agreement_id in sorted(duplicate_ids):
         matching = [item for item in reports if item.agreement_id == agreement_id]
         issues.append(
@@ -292,7 +356,13 @@ def validate_supplied_agreements(
                 )
             )
             continue
-        result = assess_agreement_report(record, selected[0], selected[1], report)
+        result = assess_agreement_report(
+            record,
+            selected[0],
+            selected[1],
+            report,
+            official_required=(report.agreement_mode == AgreementMode.OFFICIAL),
+        )
         issues.extend(result.issues)
         if result.valid and report.agreement_id not in duplicate_ids:
             validated.append(report)
@@ -319,6 +389,8 @@ def validate_release_agreements(
         if video_id in records and split in {DatasetSplit.VALIDATION, DatasetSplit.TEST}
     }
     issues: list[IntegrityIssue] = []
+    required_reports = [item for item in reports if item.video_id in required_ids]
+    _append_mixed_protocol_issue(issues, required_reports)
     report_counts = Counter(item.agreement_id for item in reports)
     duplicate_ids = {
         agreement_id for agreement_id, count in report_counts.items() if count > 1
@@ -371,6 +443,7 @@ def validate_release_agreements(
             selected[1],
             report,
             adjudication=adjudications.get(record.video_id),
+            official_required=(record.video_id in required_ids),
         )
         issues.extend(result.issues)
         if IntegrityReasonCode.STALE_AGREEMENT_REPORT in result.reason_codes:
@@ -435,6 +508,31 @@ def _result(issues: list[IntegrityIssue]) -> ArtifactIntegrityResult:
         ),
         issues=unique,
     )
+
+
+def _append_mixed_protocol_issue(
+    issues: list[IntegrityIssue], reports: list[AgreementReport]
+) -> None:
+    identities = {
+        (
+            item.agreement_mode.value,
+            item.agreement_protocol_version,
+            item.agreement_config_version,
+            item.agreement_config_fingerprint,
+            agreement_config_fingerprint(item.agreement_config),
+        )
+        for item in reports
+    }
+    if len(identities) > 1:
+        issues.append(
+            IntegrityIssue(
+                reason_code=IntegrityReasonCode.MIXED_AGREEMENT_PROTOCOLS,
+                details=(
+                    "agreement collection contains multiple mode/protocol/config "
+                    "identities"
+                ),
+            )
+        )
 
 
 def _issue(

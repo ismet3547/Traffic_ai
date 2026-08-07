@@ -21,6 +21,7 @@ from app.dataset.integrity import (
 )
 from app.dataset.io import document_sha256
 from app.dataset.models import (
+    CANONICAL_AGREEMENT_PROTOCOL,
     HANDBOOK_VERSION,
     ONTOLOGY_VERSION,
     AdjudicationArtifact,
@@ -141,6 +142,11 @@ def build_dataset_release(
                         agreement_protocol_version=(
                             agreement.agreement_protocol_version
                         ),
+                        agreement_config_version=(agreement.agreement_config_version),
+                        agreement_config_fingerprint=(
+                            agreement.agreement_config_fingerprint
+                        ),
+                        agreement_mode=agreement.agreement_mode,
                         annotation_content_sha256=sorted(
                             [
                                 agreement.annotation_a_content_sha256,
@@ -170,6 +176,7 @@ def build_dataset_release(
         created_at=created_at or datetime.now(timezone.utc),
         videos=videos,
         integrity_report=integrity,
+        agreement_protocol=CANONICAL_AGREEMENT_PROTOCOL,
         agreement_coverage=agreement_validation.coverage,
         agreement_quality=agreement_quality,
         quality_gates=gates,
@@ -179,6 +186,7 @@ def build_dataset_release(
             "Near-duplicate edited/cropped clips require manual source-group review.",
             "Release integrity was revalidated independently of intake, annotation, adjudication, and split tooling.",
             "Agreement quality uses a macro average per video over only provenance-validated reports for the exact release set.",
+            "Every validation/test agreement report is recomputed under the canonical official agreement protocol.",
         ],
     )
 
@@ -200,6 +208,17 @@ def _summarize_validated_agreement_quality(
     event_agreement = mean("event_detection_agreement")
     boundary_agreement = mean("temporal_boundary_agreement")
     confidence_agreement = mean("confidence_agreement")
+    positive_event_reports = [
+        item
+        for item in agreements
+        if item.annotation_a_event_count + item.annotation_b_event_count > 0
+    ]
+    positive_event_agreement = (
+        sum(item.event_detection_agreement for item in positive_event_reports)
+        / len(positive_event_reports)
+        if positive_event_reports
+        else None
+    )
     gates: list[QualityGateResult] = []
     if config.minimum_label_agreement is not None:
         actual = label_agreement if label_agreement is not None else 0.0
@@ -207,6 +226,7 @@ def _summarize_validated_agreement_quality(
             _gate(
                 "minimum_label_agreement",
                 actual + 1e-12 >= config.minimum_label_agreement,
+                "scope=overall_macro_per_video; "
                 f"actual={actual:.6f}, threshold={config.minimum_label_agreement:.6f}",
             )
         )
@@ -216,6 +236,7 @@ def _summarize_validated_agreement_quality(
             _gate(
                 "minimum_event_match_rate",
                 actual + 1e-12 >= config.minimum_event_match_rate,
+                "scope=overall_macro_per_video; "
                 f"actual={actual:.6f}, threshold={config.minimum_event_match_rate:.6f}",
             )
         )
@@ -223,8 +244,14 @@ def _summarize_validated_agreement_quality(
     return (
         AgreementQualitySummary(
             validated_report_count=count,
+            total_agreement_videos=count,
+            zero_event_both_annotators_video_count=(
+                count - len(positive_event_reports)
+            ),
+            positive_event_video_count=len(positive_event_reports),
             label_agreement=label_agreement,
             event_detection_agreement=event_agreement,
+            positive_event_video_event_detection_agreement=(positive_event_agreement),
             temporal_boundary_agreement=boundary_agreement,
             confidence_agreement=confidence_agreement,
             thresholds_passed=thresholds_passed,

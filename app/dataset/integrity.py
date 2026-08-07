@@ -612,12 +612,19 @@ def _integrity_gates(
         IntegrityReasonCode.AGREEMENT_SOURCE_VIDEO_MISMATCH,
         IntegrityReasonCode.AGREEMENT_SOURCE_SIZE_MISMATCH,
         IntegrityReasonCode.AGREEMENT_ANNOTATOR_MISMATCH,
-        IntegrityReasonCode.AGREEMENT_PROTOCOL_UNSUPPORTED,
         IntegrityReasonCode.AGREEMENT_ONTOLOGY_MISMATCH,
         IntegrityReasonCode.AGREEMENT_HANDBOOK_MISMATCH,
         IntegrityReasonCode.AGREEMENT_INTERNAL_INCOHERENT,
         IntegrityReasonCode.AGREEMENT_CONTENT_HASH_MISMATCH,
         IntegrityReasonCode.AGREEMENT_ADJUDICATION_REVISION_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_ADJUDICATION_REPORT_MISMATCH,
+    }
+    agreement_protocol_codes = {
+        IntegrityReasonCode.AGREEMENT_PROTOCOL_UNSUPPORTED,
+        IntegrityReasonCode.AGREEMENT_PROTOCOL_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_CONFIG_MISMATCH,
+        IntegrityReasonCode.AGREEMENT_MODE_NOT_OFFICIAL,
+        IntegrityReasonCode.MIXED_AGREEMENT_PROTOCOLS,
     }
     return [
         QualityGateResult(
@@ -659,6 +666,11 @@ def _integrity_gates(
             "agreement_integrity",
             agreement_codes,
             "agreement reports match exact source, annotation, and adjudication revisions",
+        ),
+        gate(
+            "agreement_protocol_uniform",
+            agreement_protocol_codes,
+            "all validation/test reports use the canonical official agreement protocol",
         ),
         gate(
             "agreement_coverage_complete",

@@ -55,8 +55,28 @@ def build_coverage_report(
     agreement_values = validate_supplied_agreements(
         registry, annotations, agreements or []
     )
-    agreement_statistics: dict[str, float | int | None] = {
+    positive_event_reports = [
+        item
+        for item in agreement_values
+        if item.annotation_a_event_count + item.annotation_b_event_count > 0
+    ]
+    agreement_statistics: dict[str, float | int | str | None] = {
         "report_count": len(agreement_values),
+        "zero_event_both_annotators_video_count": (
+            len(agreement_values) - len(positive_event_reports)
+        ),
+        "positive_event_video_count": len(positive_event_reports),
+        "agreement_mode": (
+            agreement_values[0].agreement_mode.value if agreement_values else None
+        ),
+        "agreement_protocol_version": (
+            agreement_values[0].agreement_protocol_version if agreement_values else None
+        ),
+        "agreement_config_fingerprint": (
+            agreement_values[0].agreement_config_fingerprint
+            if agreement_values
+            else None
+        ),
         "mean_event_detection_agreement": (
             mean(item.event_detection_agreement for item in agreement_values)
             if agreement_values
@@ -65,6 +85,11 @@ def build_coverage_report(
         "mean_label_agreement": (
             mean(item.label_agreement for item in agreement_values)
             if agreement_values
+            else None
+        ),
+        "positive_event_mean_event_detection_agreement": (
+            mean(item.event_detection_agreement for item in positive_event_reports)
+            if positive_event_reports
             else None
         ),
         "mean_temporal_boundary_agreement": (

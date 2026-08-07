@@ -122,7 +122,7 @@ Occlusion, poor resolution, night glare, lane-boundary proximity, stopped vehicl
 
 ## Independent annotation, agreement, and adjudication
 
-Two annotators receive the same raw clip and handbook but separate output locations and anonymous IDs. They do not see each other's labels. Each pass is validated and locked before comparison. Agreement uses one-to-one temporal event matching, vehicle reference when configured, and configurable temporal IoU/boundary tolerance; exact timestamps are not required. Event, label, boundary, confidence, vehicle-reference, and visibility disagreements remain separate diagnostics. Cohen's kappa, when reported, applies only to matched event-label pairs.
+Two annotators receive the same raw clip and handbook but separate output locations and anonymous IDs. They do not see each other's labels. Each pass is validated and locked before comparison. Official agreement uses one-to-one temporal event matching under the canonical protocol below; exact timestamps are not required. Event, label, boundary, confidence, vehicle-reference, and visibility disagreements remain separate diagnostics. Cohen's kappa, when reported, applies only to matched event-label pairs.
 
 ### Agreement provenance
 
@@ -135,6 +135,16 @@ Agreement quality is a macro average over exactly one provenance-validated curre
 **A high agreement score is meaningless if it was computed from different annotation revisions than the ground truth being released.**
 
 **Agreement quality is calculated only from provenance-validated reports for the exact release set.**
+
+### Canonical agreement protocol
+
+All official validation/test reports use protocol `2`, config version `1`: minimum temporal IoU `0.30`, boundary tolerance `1.0` second, and required vehicle-reference matching. The IoU threshold rejects incidental overlap, the boundary tolerance matches the current timestamping precision, and the vehicle rule ensures agreement refers to the same observed target. These values are dataset-wide and cannot be relaxed per clip.
+
+Reports store the complete config and its canonical SHA-256 fingerprint. Agreement identity includes the protocol and config fingerprint. Release validation ignores the report as a source of grading policy, independently recomputes with the canonical config, and rejects exploratory, old-protocol, noncanonical, or mixed-config reports. Changing any official agreement semantic requires a new protocol/config identity and regeneration of agreement and adjudication artifacts.
+
+Exploratory reports are allowed for development research and must be marked `exploratory`; they are never official quality evidence. **An agreement report cannot choose its own grading rules for an official dataset release. All validation/test agreement metrics in a release are computed under one canonical agreement protocol.**
+
+A positive-event clip is one where at least one annotator recorded an event. Release metadata reports both overall macro event-detection agreement and the positive-event subset, plus zero-event and positive-event clip counts. Zero-event clips remain in the overall calculation. Optional quality thresholds apply to the overall macro metrics; the positive-event metric is informational in this protocol version.
 
 An adjudicator reviews human disagreement, not model output. The artifact embeds both original locked annotations, the agreement report, an explicit decision for every disagreement, rationale, confidence, and final events. It never overwrites originals. Outcomes are agree, resolved to A, resolved to B, new consensus, or remains ambiguous. Remaining ambiguity must export as `insufficient_evidence`; consensus is never forced.
 

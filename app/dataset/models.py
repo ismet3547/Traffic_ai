@@ -8,15 +8,18 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.benchmark.fingerprints import canonical_sha256
 from app.benchmark.models import AnnotationConfidence, DatasetSplit
 
 DATASET_ANNOTATION_SCHEMA_VERSION: Final = "2.0"
 DATASET_INTAKE_SCHEMA_VERSION: Final = "1.0"
-DATASET_RELEASE_SCHEMA_VERSION: Final = "1.2"
-ADJUDICATION_SCHEMA_VERSION: Final = "1.2"
-AGREEMENT_REPORT_SCHEMA_VERSION: Final = "1.0"
-AGREEMENT_PROTOCOL_VERSION: Final = "1"
+DATASET_RELEASE_SCHEMA_VERSION: Final = "1.3"
+ADJUDICATION_SCHEMA_VERSION: Final = "1.3"
+AGREEMENT_REPORT_SCHEMA_VERSION: Final = "1.1"
+AGREEMENT_PROTOCOL_VERSION: Final = "2"
+AGREEMENT_CONFIG_VERSION: Final = "1"
 AGREEMENT_AGGREGATION_MODE: Final = "macro_per_video"
+AGREEMENT_AGGREGATION_VERSION: Final = "1"
 ONTOLOGY_VERSION: Final = "pilot-1"
 HANDBOOK_VERSION: Final = "1.0"
 DATASET_VERSION: Final = "pilot-0.1"
@@ -83,6 +86,11 @@ class IntegrityReasonCode(str, Enum):
     AGREEMENT_ADJUDICATION_REVISION_MISMATCH = (
         "AGREEMENT_ADJUDICATION_REVISION_MISMATCH"
     )
+    AGREEMENT_ADJUDICATION_REPORT_MISMATCH = "AGREEMENT_ADJUDICATION_REPORT_MISMATCH"
+    AGREEMENT_PROTOCOL_MISMATCH = "AGREEMENT_PROTOCOL_MISMATCH"
+    AGREEMENT_CONFIG_MISMATCH = "AGREEMENT_CONFIG_MISMATCH"
+    AGREEMENT_MODE_NOT_OFFICIAL = "AGREEMENT_MODE_NOT_OFFICIAL"
+    MIXED_AGREEMENT_PROTOCOLS = "MIXED_AGREEMENT_PROTOCOLS"
 
 
 class VisibilityQuality(str, Enum):
@@ -283,9 +291,54 @@ class IntakeRegistry(StrictModel):
 
 
 class AgreementConfig(StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     minimum_temporal_iou: float = Field(default=0.30, gt=0, le=1)
     boundary_tolerance_seconds: float = Field(default=1.0, ge=0)
     require_vehicle_reference_match: bool = True
+
+
+class AgreementMode(str, Enum):
+    OFFICIAL = "official"
+    EXPLORATORY = "exploratory"
+
+
+def agreement_config_fingerprint(config: AgreementConfig) -> str:
+    """Stable semantic identity for every agreement matching parameter."""
+    return canonical_sha256(config.model_dump(mode="json"))
+
+
+CANONICAL_AGREEMENT_CONFIG: Final = AgreementConfig(
+    minimum_temporal_iou=0.30,
+    boundary_tolerance_seconds=1.0,
+    require_vehicle_reference_match=True,
+)
+CANONICAL_AGREEMENT_CONFIG_FINGERPRINT: Final = agreement_config_fingerprint(
+    CANONICAL_AGREEMENT_CONFIG
+)
+
+
+class AgreementProtocolIdentity(StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: str
+    config_version: str
+    config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    aggregation_version: str
+    ontology_version: str
+    handbook_version: str
+    agreement_config: AgreementConfig
+
+
+CANONICAL_AGREEMENT_PROTOCOL: Final = AgreementProtocolIdentity(
+    protocol_version=AGREEMENT_PROTOCOL_VERSION,
+    config_version=AGREEMENT_CONFIG_VERSION,
+    config_fingerprint=CANONICAL_AGREEMENT_CONFIG_FINGERPRINT,
+    aggregation_version=AGREEMENT_AGGREGATION_VERSION,
+    ontology_version=ONTOLOGY_VERSION,
+    handbook_version=HANDBOOK_VERSION,
+    agreement_config=CANONICAL_AGREEMENT_CONFIG,
+)
 
 
 class DisagreementType(str, Enum):
@@ -318,8 +371,11 @@ class AnnotationDisagreement(StrictModel):
 
 
 class AgreementReport(StrictModel):
-    schema_version: Literal["1.0"] = AGREEMENT_REPORT_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = AGREEMENT_REPORT_SCHEMA_VERSION
+    agreement_mode: AgreementMode = AgreementMode.OFFICIAL
     agreement_protocol_version: str = AGREEMENT_PROTOCOL_VERSION
+    agreement_config_version: str = AGREEMENT_CONFIG_VERSION
+    agreement_config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     agreement_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     agreement_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     video_id: str
@@ -335,7 +391,7 @@ class AgreementReport(StrictModel):
     annotation_b_handbook_version: str
     annotation_a_event_count: int = Field(ge=0)
     annotation_b_event_count: int = Field(ge=0)
-    config: AgreementConfig
+    agreement_config: AgreementConfig
     matched_event_count: int = Field(ge=0)
     event_detection_agreement: float = Field(ge=0, le=1)
     label_agreement: float = Field(ge=0, le=1)
@@ -356,6 +412,10 @@ class AgreementReport(StrictModel):
             raise ValueError("matched_event_count does not match matches")
         if self.disagreement_count != len(self.disagreements):
             raise ValueError("disagreement_count does not match disagreements")
+        if self.agreement_config_fingerprint != agreement_config_fingerprint(
+            self.agreement_config
+        ):
+            raise ValueError("agreement config fingerprint is internally incoherent")
         denominator = self.annotation_a_event_count + self.annotation_b_event_count
         expected_detection = (
             2 * self.matched_event_count / denominator if denominator else 1.0
@@ -371,9 +431,9 @@ class AgreementReport(StrictModel):
         expected_boundary = (
             sum(
                 item.start_difference_seconds
-                <= self.config.boundary_tolerance_seconds + 1e-12
+                <= self.agreement_config.boundary_tolerance_seconds + 1e-12
                 and item.end_difference_seconds
-                <= self.config.boundary_tolerance_seconds + 1e-12
+                <= self.agreement_config.boundary_tolerance_seconds + 1e-12
                 for item in self.matches
             )
             / matched
@@ -439,7 +499,7 @@ class AdjudicationDecision(StrictModel):
 
 
 class AdjudicationArtifact(StrictModel):
-    schema_version: Literal["1.2"] = ADJUDICATION_SCHEMA_VERSION
+    schema_version: Literal["1.3"] = ADJUDICATION_SCHEMA_VERSION
     video_id: str
     source_video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_video_size_bytes: int | None = Field(default=None, gt=0)
@@ -570,7 +630,7 @@ class CoverageReport(StrictModel):
     camera_configuration_distribution: dict[str, int]
     vehicle_class_distribution: dict[str, int]
     split_counts: dict[str, int]
-    agreement_statistics: dict[str, float | int | None]
+    agreement_statistics: dict[str, float | int | str | None]
 
 
 class QualityGateResult(StrictModel):
@@ -629,11 +689,36 @@ class AgreementCoverage(StrictModel):
 class AgreementQualitySummary(StrictModel):
     aggregation_mode: Literal["macro_per_video"] = AGREEMENT_AGGREGATION_MODE
     validated_report_count: int = Field(ge=0)
+    total_agreement_videos: int = Field(ge=0)
+    zero_event_both_annotators_video_count: int = Field(ge=0)
+    positive_event_video_count: int = Field(ge=0)
     label_agreement: float | None = Field(default=None, ge=0, le=1)
     event_detection_agreement: float | None = Field(default=None, ge=0, le=1)
+    positive_event_video_event_detection_agreement: float | None = Field(
+        default=None, ge=0, le=1
+    )
     temporal_boundary_agreement: float | None = Field(default=None, ge=0, le=1)
     confidence_agreement: float | None = Field(default=None, ge=0, le=1)
     thresholds_passed: bool
+
+    @model_validator(mode="after")
+    def validate_video_counts(self) -> AgreementQualitySummary:
+        if self.validated_report_count != self.total_agreement_videos:
+            raise ValueError("agreement quality report counts differ")
+        if (
+            self.zero_event_both_annotators_video_count
+            + self.positive_event_video_count
+            != self.total_agreement_videos
+        ):
+            raise ValueError(
+                "zero-event and positive-event video counts are incoherent"
+            )
+        if (
+            self.positive_event_video_count == 0
+            and self.positive_event_video_event_detection_agreement is not None
+        ):
+            raise ValueError("positive-event agreement requires positive-event videos")
+        return self
 
 
 class ValidatedAgreementSet(StrictModel):
@@ -647,6 +732,9 @@ class ReleaseAgreementProvenance(StrictModel):
     agreement_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     agreement_content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     agreement_protocol_version: str
+    agreement_config_version: str
+    agreement_config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agreement_mode: AgreementMode
     annotation_content_sha256: list[str] = Field(min_length=2, max_length=2)
     aggregation_unit: Literal["video"] = "video"
 
@@ -662,6 +750,15 @@ class IntegrityScenarioOutcome(StrictModel):
     actual_label_agreement: float | None = Field(default=None, ge=0, le=1)
     expected_event_detection_agreement: float | None = Field(default=None, ge=0, le=1)
     actual_event_detection_agreement: float | None = Field(default=None, ge=0, le=1)
+    supplied_event_detection_agreement: float | None = Field(default=None, ge=0, le=1)
+    canonical_recomputed_event_detection_agreement: float | None = Field(
+        default=None, ge=0, le=1
+    )
+    agreement_mode: AgreementMode | None = None
+    agreement_protocol_version: str | None = None
+    agreement_config_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
 
 
 class IntegrityScenarioSummary(StrictModel):
@@ -709,13 +806,14 @@ class ReleaseVideo(StrictModel):
 
 
 class DatasetRelease(StrictModel):
-    schema_version: Literal["1.2"] = DATASET_RELEASE_SCHEMA_VERSION
+    schema_version: Literal["1.3"] = DATASET_RELEASE_SCHEMA_VERSION
     dataset_version: str = DATASET_VERSION
     created_at: datetime
     ontology_version: str = ONTOLOGY_VERSION
     handbook_version: str = HANDBOOK_VERSION
     videos: list[ReleaseVideo]
     integrity_report: DatasetReleaseIntegrityReport
+    agreement_protocol: AgreementProtocolIdentity
     agreement_coverage: AgreementCoverage
     agreement_quality: AgreementQualitySummary
     quality_gates: list[QualityGateResult]
@@ -724,6 +822,8 @@ class DatasetRelease(StrictModel):
 
     @model_validator(mode="after")
     def validate_agreement_provenance(self) -> DatasetRelease:
+        if self.agreement_protocol != CANONICAL_AGREEMENT_PROTOCOL:
+            raise ValueError("release agreement protocol is not canonical")
         if self.agreement_coverage.validated_report_count != (
             self.agreement_quality.validated_report_count
         ):
@@ -742,6 +842,18 @@ class DatasetRelease(StrictModel):
             ) != sorted(video.agreement_provenance.annotation_content_sha256):
                 raise ValueError(
                     "release agreement provenance differs from annotation hashes"
+                )
+            if video.agreement_provenance is not None and (
+                video.agreement_provenance.agreement_mode != AgreementMode.OFFICIAL
+                or video.agreement_provenance.agreement_protocol_version
+                != self.agreement_protocol.protocol_version
+                or video.agreement_provenance.agreement_config_version
+                != self.agreement_protocol.config_version
+                or video.agreement_provenance.agreement_config_fingerprint
+                != self.agreement_protocol.config_fingerprint
+            ):
+                raise ValueError(
+                    "release video agreement provenance is not canonical official"
                 )
         return self
 

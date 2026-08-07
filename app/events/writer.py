@@ -13,8 +13,9 @@ import numpy as np
 
 from app.config import OutputConfig
 from app.models import (
-    CalibrationStatusMetadata,
+    CalibrationQualityMetadata,
     CameraMotionMetadata,
+    CameraPoseMetadata,
     CandidateDecisionMetadata,
     CandidateLifecycleMetadata,
     CandidateTransition,
@@ -22,6 +23,7 @@ from app.models import (
     GapEstimate,
     GapEstimateMetadata,
     OvertakingAssessmentMetadata,
+    PhysicalMeasurementMetadata,
     SpeedEstimateMetadata,
     TrafficContextMetadata,
     VideoInfo,
@@ -88,7 +90,7 @@ class EventArtifactWriter:
         for transition in transitions:
             if transition.transition == "started":
                 self._start(transition, frame)
-            elif transition.transition in {"suspended", "resumed"}:
+            elif transition.transition in {"suspended", "resumed", "pending_close"}:
                 self._update(transition)
 
         for recording in self._active.values():
@@ -172,8 +174,10 @@ class EventArtifactWriter:
             overtaking_assessment=_overtaking_metadata(transition),
             candidate_lifecycle=_lifecycle_metadata(transition),
             decision_history=_decision_history(transition),
-            calibration_status=_calibration_metadata(transition),
+            calibration=_calibration_metadata(transition),
             camera_motion=_camera_motion_metadata(transition),
+            camera_pose=_camera_pose_metadata(transition),
+            physical_measurements=_physical_measurement_metadata(transition),
             speed_estimate=_speed_metadata(transition),
             image_position=(
                 transition.position.image_position if transition.position else None
@@ -181,8 +185,8 @@ class EventArtifactWriter:
             normalized_position=(
                 transition.position.normalized_position if transition.position else None
             ),
-            world_position=(
-                transition.position.world_position if transition.position else None
+            world_position_m=(
+                transition.position.world_position_m if transition.position else None
             ),
             coordinate_mode=(
                 transition.position.coordinate_mode
@@ -286,6 +290,18 @@ def _traffic_context_metadata(
         right_lane_rear_gap=_gap_metadata(
             vehicle.right_lane_rear_gap if vehicle else None
         ),
+        right_lane_front_gap_m=_gap_value(
+            vehicle.right_lane_front_gap if vehicle else None, "meters"
+        ),
+        right_lane_rear_gap_m=_gap_value(
+            vehicle.right_lane_rear_gap if vehicle else None, "meters"
+        ),
+        right_lane_front_gap_normalized=_gap_value(
+            vehicle.right_lane_front_gap if vehicle else None, "normalized"
+        ),
+        right_lane_rear_gap_normalized=_gap_value(
+            vehicle.right_lane_rear_gap if vehicle else None, "normalized"
+        ),
     )
 
 
@@ -321,11 +337,18 @@ def _refresh_metadata(metadata: EventMetadata, transition: CandidateTransition) 
     if transition.position is not None:
         metadata.image_position = transition.position.image_position
         metadata.normalized_position = transition.position.normalized_position
-        metadata.world_position = transition.position.world_position
+        metadata.world_position_m = transition.position.world_position_m
         metadata.coordinate_mode = transition.position.coordinate_mode
-    metadata.calibration_status = _calibration_metadata(transition)
-    metadata.camera_motion = _camera_motion_metadata(transition)
-    metadata.speed_estimate = _speed_metadata(transition)
+    if transition.calibration_quality is not None:
+        metadata.calibration = _calibration_metadata(transition)
+    if transition.camera_motion is not None:
+        metadata.camera_motion = _camera_motion_metadata(transition)
+    if transition.camera_pose is not None:
+        metadata.camera_pose = _camera_pose_metadata(transition)
+    if transition.physical_measurements is not None:
+        metadata.physical_measurements = _physical_measurement_metadata(transition)
+    if transition.speed_estimate is not None:
+        metadata.speed_estimate = _speed_metadata(transition)
 
 
 def _gap_metadata(gap: GapEstimate | None) -> GapEstimateMetadata | None:
@@ -337,6 +360,10 @@ def _gap_metadata(gap: GapEstimate | None) -> GapEstimateMetadata | None:
         confidence=gap.confidence,
         coordinate_mode=gap.coordinate_mode,
     )
+
+
+def _gap_value(gap: GapEstimate | None, unit: str) -> float | None:
+    return gap.value if gap is not None and gap.unit == unit else None
 
 
 def _lifecycle_metadata(
@@ -354,6 +381,8 @@ def _lifecycle_metadata(
         ),
         cancelled_at=transition.cancelled_at,
         cancellation_reason=transition.cancellation_reason,
+        close_requested_at=transition.close_requested_at,
+        close_reason=transition.close_reason,
     )
 
 
@@ -372,16 +401,21 @@ def _decision_history(
 
 def _calibration_metadata(
     transition: CandidateTransition,
-) -> CalibrationStatusMetadata | None:
-    status = transition.calibration_status
+) -> CalibrationQualityMetadata | None:
+    status = transition.calibration_quality
     if status is None:
         return None
-    return CalibrationStatusMetadata(
+    return CalibrationQualityMetadata(
         mode=status.mode,
-        valid=status.valid,
-        reprojection_error_pixels=status.reprojection_error_pixels,
+        matrix_valid=status.matrix_valid,
+        numerically_stable=status.numerically_stable,
+        validation_mode=status.validation_mode,
+        fit_reprojection_error_pixels=status.fit_reprojection_error_pixels,
+        validation_reprojection_error_pixels=status.validation_reprojection_error_pixels,
+        condition_metric=status.condition_metric,
         confidence=status.confidence,
-        reason=status.reason,
+        confidence_basis=status.confidence_basis,
+        reason_codes=list(status.reason_codes),
         world_units=status.world_units,
     )
 
@@ -400,6 +434,38 @@ def _camera_motion_metadata(
         valid=motion.valid,
         level=motion.level,
         method=motion.method,
+        stabilization_applied=motion.stabilization_applied,
+    )
+
+
+def _camera_pose_metadata(
+    transition: CandidateTransition,
+) -> CameraPoseMetadata | None:
+    pose = transition.camera_pose
+    if pose is None:
+        return None
+    return CameraPoseMetadata(
+        status=pose.status,
+        translation_px=pose.translation_px,
+        rotation_deg=pose.rotation_deg,
+        confidence=pose.confidence,
+        sample_count=pose.sample_count,
+        stabilization_applied=pose.stabilization_applied,
+        reason_codes=list(pose.reason_codes),
+    )
+
+
+def _physical_measurement_metadata(
+    transition: CandidateTransition,
+) -> PhysicalMeasurementMetadata | None:
+    permission = transition.physical_measurements
+    if permission is None:
+        return None
+    return PhysicalMeasurementMetadata(
+        allowed=permission.allowed,
+        confidence=permission.confidence,
+        status=permission.status,
+        reason_codes=list(permission.reason_codes),
     )
 
 
@@ -416,4 +482,6 @@ def _speed_metadata(
         speed_mode=speed.speed_mode,
         normalized_motion_rate=speed.normalized_motion_rate,
         sample_count=speed.sample_count,
+        physical_measurement_status=speed.physical_measurement_status,
+        reason_codes=list(speed.reason_codes),
     )

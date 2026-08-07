@@ -32,9 +32,9 @@ class TrackMotionSample:
     lane_transition: LaneTransition | None = None
     image_position: tuple[float, float] | None = None
     normalized_position: tuple[float, float] | None = None
-    world_position: tuple[float, float] | None = None
+    world_position_m: tuple[float, float] | None = None
     coordinate_mode: str = "normalized_image"
-    calibration_confidence: float = 0.0
+    world_position_confidence: float = 0.0
     speed_estimate: SpeedEstimate | None = None
 
 
@@ -99,9 +99,9 @@ class MotionHistoryStore:
                     lane_transition=transition_by_track.get(track_id),
                     image_position=position.image_position,
                     normalized_position=position.normalized_position,
-                    world_position=position.world_position,
+                    world_position_m=position.world_position_m,
                     coordinate_mode=position.coordinate_mode,
-                    calibration_confidence=position.calibration_confidence,
+                    world_position_confidence=position.world_position_confidence,
                     speed_estimate=(speed_estimates or {}).get(track_id),
                 )
             )

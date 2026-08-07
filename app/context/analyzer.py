@@ -8,11 +8,13 @@ from app.config import CongestionConfig, TrafficContextConfig
 from app.models import (
     CalibrationStatus,
     CameraMotionEstimate,
+    CameraPoseStatus,
     CongestionLevel,
     GlobalTrafficContext,
     LaneObservation,
     NeighborReference,
     NeighborVehicles,
+    PhysicalMeasurementPermission,
     RoadPosition,
     SpeedEstimate,
     TrafficFrameContext,
@@ -40,6 +42,8 @@ class TrafficContextAnalyzer:
         history: MotionHistoryStore,
         calibration_status: CalibrationStatus | None = None,
         camera_motion: CameraMotionEstimate | None = None,
+        camera_pose: CameraPoseStatus | None = None,
+        physical_measurements: PhysicalMeasurementPermission | None = None,
         speeds: dict[int, SpeedEstimate] | None = None,
     ) -> TrafficFrameContext:
         lane_by_track = {
@@ -58,26 +62,56 @@ class TrafficContextAnalyzer:
             history,
             calibration_status,
             camera_motion,
+            camera_pose,
+            physical_measurements,
         )
         vehicles: dict[int, VehicleTrafficContext] = {}
         for track_id, position in positions.items():
             lane_id = lane_by_track.get(track_id)
             adjacent_right = self._adjacent_right(lane_id)
             neighbors = self._neighbors(
-                track_id, lane_id, adjacent_right, lane_by_track, positions
+                track_id,
+                lane_id,
+                adjacent_right,
+                lane_by_track,
+                positions,
+                allow_physical=(
+                    physical_measurements.allowed
+                    if physical_measurements is not None
+                    else False
+                ),
+            )
+            use_physical = (
+                position.calibrated
+                and physical_measurements is not None
+                and physical_measurements.allowed
             )
             nearby_window = (
                 self._context_config.nearby_longitudinal_window_meters
-                if position.calibrated
+                if use_physical
                 else self._context_config.nearby_longitudinal_window_normalized
             )
-            nearby_count = sum(
-                1
-                for other_id, other_position in positions.items()
-                if other_id != track_id
-                and abs(other_position.longitudinal - position.longitudinal)
-                <= nearby_window
+            target_longitudinal = (
+                position.longitudinal
+                if use_physical
+                else position.normalized_position[1]
+                if position.normalized_position is not None
+                else None
             )
+            nearby_count = 0
+            for other_id, other_position in positions.items():
+                if other_id == track_id or target_longitudinal is None:
+                    continue
+                if use_physical:
+                    if not other_position.calibrated:
+                        continue
+                    other_longitudinal = other_position.longitudinal
+                else:
+                    if other_position.normalized_position is None:
+                        continue
+                    other_longitudinal = other_position.normalized_position[1]
+                if abs(other_longitudinal - target_longitudinal) <= nearby_window:
+                    nearby_count += 1
             vehicles[track_id] = VehicleTrafficContext(
                 track_id=track_id,
                 neighbors=neighbors,
@@ -102,6 +136,8 @@ class TrafficContextAnalyzer:
         history: MotionHistoryStore,
         calibration_status: CalibrationStatus | None,
         camera_motion: CameraMotionEstimate | None,
+        camera_pose: CameraPoseStatus | None,
+        physical_measurements: PhysicalMeasurementPermission | None,
     ) -> GlobalTrafficContext:
         total = sum(lane_counts.values())
         lane_count = max(1, len(self._lane_ids))
@@ -134,6 +170,8 @@ class TrafficContextAnalyzer:
         coordinate_system = (
             next(iter(positions.values())).coordinate_system
             if positions
+            and physical_measurements is not None
+            and physical_measurements.allowed
             else "normalized_image"
         )
         return GlobalTrafficContext(
@@ -144,8 +182,10 @@ class TrafficContextAnalyzer:
             average_normalized_motion_per_second=average_motion,
             confidence=confidence,
             coordinate_system=coordinate_system,
-            calibration_status=calibration_status,
+            calibration_quality=calibration_status,
             camera_motion=camera_motion,
+            camera_pose=camera_pose,
+            physical_measurements=physical_measurements,
         )
 
     def _congestion_level(
@@ -192,13 +232,14 @@ class TrafficContextAnalyzer:
         adjacent_right: str | None,
         lane_by_track: dict[int, str | None],
         positions: dict[int, RoadPosition],
+        allow_physical: bool,
     ) -> NeighborVehicles:
         target = positions[track_id]
 
         def nearest(lane: str | None, ahead: bool) -> NeighborReference | None:
             if lane is None:
                 return None
-            if target.calibrated:
+            if allow_physical and target.calibrated:
                 calibrated = candidates_for_mode(lane, ahead, use_world=True)
                 if calibrated:
                     return min(calibrated, key=lambda item: item.longitudinal_gap)
@@ -241,8 +282,8 @@ class TrafficContextAnalyzer:
                             gap_unit="meters" if use_world else "normalized",
                             confidence=(
                                 min(
-                                    target.calibration_confidence,
-                                    other.calibration_confidence,
+                                    target.world_position_confidence,
+                                    other.world_position_confidence,
                                 )
                                 if use_world
                                 else 0.65

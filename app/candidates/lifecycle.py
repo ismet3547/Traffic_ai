@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -11,6 +12,8 @@ from app.models import (
     CandidateDecisionRecord,
     CandidateLifecycleState,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 _HARD_INVALIDATIONS = {
     "CONGESTION",
@@ -31,6 +34,8 @@ class LifecycleUpdate:
     finalized_at: float | None
     cancelled_at: float | None
     cancellation_reason: str | None
+    close_requested_at: float | None
+    close_reason: str | None
     decision_history: tuple[CandidateDecisionRecord, ...]
 
 
@@ -41,41 +46,45 @@ class _LifecycleRecord:
     suspended_at: float | None = None
     invalid_since: float | None = None
     invalid_reason: str | None = None
+    close_requested_at: float | None = None
+    close_reason: str | None = None
     finalized_at: float | None = None
     cancelled_at: float | None = None
     cancellation_reason: str | None = None
     cooldown_until: float = 0.0
+    latest_decision: CandidateDecision | None = None
     decision_history: deque[CandidateDecisionRecord] = field(default_factory=deque)
 
 
 class CandidateLifecycleManager:
-    """Separates candidate start eligibility from continuation validity."""
+    """Collect until a real close trigger, settle, then make one terminal decision."""
 
     def __init__(self, config: CandidateLifecycleConfig) -> None:
         self._config = config
         self._records: dict[int, _LifecycleRecord] = {}
 
     def update(
-        self,
-        track_id: int,
-        timestamp_seconds: float,
-        decision: CandidateDecision,
+        self, track_id: int, timestamp_seconds: float, decision: CandidateDecision
     ) -> LifecycleUpdate:
         record = self._records.setdefault(track_id, self._new_record())
-        transition: str | None = None
+        record.latest_decision = decision
+        if record.state in {
+            CandidateLifecycleState.FINALIZED,
+            CandidateLifecycleState.CANCELLED,
+        }:
+            if (
+                record.state == CandidateLifecycleState.CANCELLED
+                and timestamp_seconds >= record.cooldown_until
+                and decision.eligible
+            ):
+                self._reset_episode(record)
+                record.state = CandidateLifecycleState.ACCUMULATING
+            else:
+                return self._snapshot(record, None)
 
         if record.state == CandidateLifecycleState.IDLE:
             record.state = CandidateLifecycleState.ACCUMULATING
             self._append(record, timestamp_seconds, "evidence_accumulating", ())
-
-        if record.state == CandidateLifecycleState.FINALIZED:
-            return self._snapshot(record, None)
-
-        if record.state == CandidateLifecycleState.CANCELLED:
-            if timestamp_seconds < record.cooldown_until or not decision.eligible:
-                return self._snapshot(record, None)
-            self._reset_episode(record)
-            record.state = CandidateLifecycleState.ACCUMULATING
 
         if record.state == CandidateLifecycleState.ACCUMULATING:
             if decision.eligible:
@@ -87,8 +96,8 @@ class CandidateLifecycleManager:
                     "candidate_started",
                     decision.reason_codes,
                 )
-                transition = "started"
-            return self._snapshot(record, transition)
+                return self._snapshot(record, "started")
+            return self._snapshot(record, None)
 
         if record.state == CandidateLifecycleState.CANDIDATE_ACTIVE:
             if not decision.eligible:
@@ -106,17 +115,11 @@ class CandidateLifecycleManager:
             if (
                 record.candidate_started_at is not None
                 and timestamp_seconds - record.candidate_started_at
-                >= self._config.finalize_after_seconds
+                >= self._config.max_event_duration_seconds
             ):
-                record.state = CandidateLifecycleState.FINALIZED
-                record.finalized_at = timestamp_seconds
-                self._append(
-                    record,
-                    timestamp_seconds,
-                    "candidate_finalized",
-                    decision.reason_codes,
-                )
-                return self._snapshot(record, "finalized")
+                return self.request_close(
+                    track_id, timestamp_seconds, "maximum_evidence_window"
+                )  # type: ignore[return-value]
             return self._snapshot(record, None)
 
         if record.state == CandidateLifecycleState.SUSPENDED:
@@ -142,24 +145,95 @@ class CandidateLifecycleManager:
                 return self._cancel(record, timestamp_seconds, record.invalid_reason)
             return self._snapshot(record, None)
 
-        return self._snapshot(record, transition)
+        if record.state == CandidateLifecycleState.PENDING_CLOSE:
+            if decision.suppression_reason == "OVERTAKING_CONFIRMED":
+                return self._cancel(record, timestamp_seconds, "OVERTAKING_CONFIRMED")
+            close_at = (
+                record.close_requested_at
+                if record.close_requested_at is not None
+                else timestamp_seconds
+            )
+            if (
+                timestamp_seconds - close_at + 1e-9
+                < self._config.evidence_settle_seconds
+            ):
+                return self._snapshot(record, None)
+            if decision.eligible:
+                return self._finalize(record, timestamp_seconds)
+            return self._cancel(
+                record,
+                timestamp_seconds,
+                decision.suppression_reason
+                or record.invalid_reason
+                or "INSUFFICIENT_CONTEXT",
+            )
 
-    def close(
+        return self._snapshot(record, None)
+
+    def request_close(
         self, track_id: int, timestamp_seconds: float, reason: str
     ) -> LifecycleUpdate | None:
         record = self._records.get(track_id)
         if record is None:
             return None
-        if record.state == CandidateLifecycleState.CANDIDATE_ACTIVE:
-            record.state = CandidateLifecycleState.FINALIZED
-            record.finalized_at = timestamp_seconds
-            self._append(record, timestamp_seconds, "candidate_finalized", (reason,))
-            return self._snapshot(record, "finalized")
-        if record.state == CandidateLifecycleState.SUSPENDED:
-            return self._cancel(
-                record, timestamp_seconds, record.invalid_reason or reason
+        if record.state in {
+            CandidateLifecycleState.FINALIZED,
+            CandidateLifecycleState.CANCELLED,
+        }:
+            return self._snapshot(record, None)
+        if record.state not in {
+            CandidateLifecycleState.CANDIDATE_ACTIVE,
+            CandidateLifecycleState.SUSPENDED,
+            CandidateLifecycleState.PENDING_CLOSE,
+        }:
+            return self._snapshot(record, None)
+        if record.state != CandidateLifecycleState.PENDING_CLOSE:
+            record.state = CandidateLifecycleState.PENDING_CLOSE
+            record.close_requested_at = timestamp_seconds
+            record.close_reason = reason
+            self._append(
+                record, timestamp_seconds, "candidate_close_requested", (reason,)
             )
+            return self._snapshot(record, "pending_close")
         return self._snapshot(record, None)
+
+    def force_close(
+        self,
+        track_id: int,
+        timestamp_seconds: float,
+        reason: str,
+        decision: CandidateDecision | None = None,
+    ) -> LifecycleUpdate | None:
+        """Deterministic end-of-source close when no later evidence can arrive."""
+
+        record = self._records.get(track_id)
+        if record is None:
+            return None
+        if record.state in {
+            CandidateLifecycleState.FINALIZED,
+            CandidateLifecycleState.CANCELLED,
+        }:
+            return self._snapshot(record, None)
+        final_decision = decision or record.latest_decision
+        if record.candidate_started_at is None:
+            return self._snapshot(record, None)
+        if final_decision is not None and final_decision.eligible:
+            record.close_requested_at = record.close_requested_at or timestamp_seconds
+            record.close_reason = record.close_reason or reason
+            return self._finalize(record, timestamp_seconds)
+        return self._cancel(
+            record,
+            timestamp_seconds,
+            (final_decision.suppression_reason if final_decision else None)
+            or record.invalid_reason
+            or reason,
+        )
+
+    # Compatibility alias: close now requests a close; it is not terminal.
+    def close(
+        self, track_id: int, timestamp_seconds: float, reason: str
+    ) -> LifecycleUpdate | None:
+        return self.request_close(track_id, timestamp_seconds, reason)
 
     def state(self, track_id: int) -> CandidateLifecycleState:
         record = self._records.get(track_id)
@@ -168,11 +242,17 @@ class CandidateLifecycleManager:
     def remove(self, track_id: int) -> None:
         self._records.pop(track_id, None)
 
+    def _finalize(
+        self, record: _LifecycleRecord, timestamp_seconds: float
+    ) -> LifecycleUpdate:
+        record.state = CandidateLifecycleState.FINALIZED
+        record.finalized_at = timestamp_seconds
+        reasons = _reason_tuple(record.close_reason)
+        self._append(record, timestamp_seconds, "candidate_finalized", reasons)
+        return self._snapshot(record, "finalized")
+
     def _cancel(
-        self,
-        record: _LifecycleRecord,
-        timestamp_seconds: float,
-        reason: str | None,
+        self, record: _LifecycleRecord, timestamp_seconds: float, reason: str | None
     ) -> LifecycleUpdate:
         record.state = CandidateLifecycleState.CANCELLED
         record.cancelled_at = timestamp_seconds
@@ -186,6 +266,10 @@ class CandidateLifecycleManager:
             "candidate_cancelled",
             _reason_tuple(record.cancellation_reason),
         )
+        if record.cancellation_reason == "OVERTAKING_CONFIRMED":
+            LOGGER.warning(
+                "Review candidate cancelled by later exculpatory overtaking evidence"
+            )
         return self._snapshot(record, "cancelled")
 
     def _grace_for(self, reason: str | None) -> float:
@@ -206,9 +290,12 @@ class CandidateLifecycleManager:
         record.suspended_at = None
         record.invalid_since = None
         record.invalid_reason = None
+        record.close_requested_at = None
+        record.close_reason = None
         record.finalized_at = None
         record.cancelled_at = None
         record.cancellation_reason = None
+        record.latest_decision = None
         record.decision_history.clear()
 
     @staticmethod
@@ -232,6 +319,8 @@ class CandidateLifecycleManager:
             finalized_at=record.finalized_at,
             cancelled_at=record.cancelled_at,
             cancellation_reason=record.cancellation_reason,
+            close_requested_at=record.close_requested_at,
+            close_reason=record.close_reason,
             decision_history=tuple(record.decision_history),
         )
 

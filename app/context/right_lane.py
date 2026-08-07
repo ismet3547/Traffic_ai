@@ -97,7 +97,7 @@ class RightLaneOpportunityTracker:
                         for reference in (front_reference, rear_reference)
                     )
                     position_confidence = (
-                        context.positions[track_id].calibration_confidence
+                        context.positions[track_id].world_position_confidence
                         if use_meters
                         else 0.65
                     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.models import CameraMotionEstimate, RoadPosition, SpeedEstimate
+from app.models import PhysicalMeasurementPermission, RoadPosition, SpeedEstimate
 
 
 class SpeedEstimator(Protocol):
@@ -12,5 +12,5 @@ class SpeedEstimator(Protocol):
         self,
         timestamp_seconds: float,
         positions: dict[int, RoadPosition],
-        camera_motion: CameraMotionEstimate | None = None,
+        physical_permission: PhysicalMeasurementPermission | None = None,
     ) -> dict[int, SpeedEstimate]: ...

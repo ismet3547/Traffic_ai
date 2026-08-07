@@ -9,14 +9,18 @@ from app.config import OutputConfig
 from app.events import writer as writer_module
 from app.events.writer import EventArtifactWriter
 from app.models import (
+    CalibrationQuality,
+    CameraPoseStatus,
     CandidateDecisionRecord,
     CandidateTransition,
     CongestionLevel,
+    GapEstimate,
     GlobalTrafficContext,
     NeighborVehicles,
     OvertakeState,
     OvertakingAssessment,
     OvertakingStatus,
+    PhysicalMeasurementPermission,
     VehicleTrafficContext,
     VideoInfo,
 )
@@ -84,6 +88,7 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
         right_lane_available=True,
         right_lane_available_seconds=2.2,
         right_lane_confidence=0.8,
+        right_lane_front_gap=GapEstimate(0.12, "normalized", 0.7, "normalized_image"),
     )
     overtaking = OvertakingAssessment(
         track_id=4,
@@ -114,6 +119,30 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
                 overtaking_assessment=overtaking,
                 behavior_classification="possible_left_lane_occupation",
                 evidence_confidence_score=0.79,
+                calibration_quality=CalibrationQuality(
+                    mode="normalized",
+                    matrix_valid=False,
+                    numerically_stable=False,
+                    validation_mode="NONE",
+                    fit_reprojection_error_pixels=None,
+                    validation_reprojection_error_pixels=None,
+                    condition_metric=None,
+                    confidence=0.0,
+                    confidence_basis="not_calibrated",
+                    reason_codes=("CALIBRATION_NOT_CONFIGURED",),
+                ),
+                camera_pose=CameraPoseStatus(
+                    "unavailable",
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    False,
+                    ("CAMERA_MOTION_ESTIMATE_UNAVAILABLE",),
+                ),
+                physical_measurements=PhysicalMeasurementPermission(
+                    False, 0.0, "unavailable", ("CALIBRATION_NOT_CONFIGURED",)
+                ),
             )
         ],
     )
@@ -138,7 +167,7 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
     assert (event_directory / "representative.jpg").is_file()
     assert (event_directory / "event.mp4").is_file()
     assert metadata["event_type"] == "left_lane_review_candidate"
-    assert metadata["schema_version"] == "3.0"
+    assert metadata["schema_version"] == "3.1"
     assert metadata["review_status"] == "pending_human_review"
     assert metadata["candidate_lifecycle"]["state"] == "finalized"
     assert metadata["human_review_required"] is True
@@ -155,7 +184,29 @@ def test_writes_finalized_human_review_artifacts(tmp_path, monkeypatch) -> None:
         "LEFT_LANE_DURATION_EXCEEDED",
         "RIGHT_LANE_AVAILABLE",
     ]
+    assert metadata["traffic_context"]["right_lane_front_gap_m"] is None
+    assert metadata["traffic_context"]["right_lane_front_gap_normalized"] == 0.12
+    assert metadata["physical_measurements"]["allowed"] is False
+    assert metadata["world_position_m"] is None
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1
+
+    # Repeated terminal delivery is idempotent and cannot duplicate the queue.
+    artifact_writer.process_frame(
+        frame,
+        [
+            CandidateTransition(
+                transition="finalized",
+                track_id=4,
+                lane_id="left",
+                start_timestamp_seconds=1.0,
+                timestamp_seconds=5.0,
+                duration_seconds=4.0,
+                confidence_score=0.85,
+            )
+        ],
+    )
+    assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 1
+    assert artifact_writer.completed_count == 1
 
 
 def test_cancelled_event_is_preserved_but_not_pending_review(

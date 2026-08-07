@@ -29,12 +29,32 @@ calibration:
   image_points: [[410, 720], [880, 720], [690, 420], [590, 420]]
   # PLACEHOLDER measured road-plane coordinates corresponding one-for-one above.
   world_points: [[0.0, 0.0], [12.0, 0.0], [12.0, 50.0], [0.0, 50.0]]
+  # Add separately measured holdout points here. Do not derive them from the
+  # fitted matrix; these empty lists intentionally keep this example unverified.
+  validation_image_points: []
+  validation_world_points: []
   fallback_to_normalized: false
   maximum_reprojection_error_pixels: 5.0
-  minimum_confidence_for_physical_measurements: 0.55
+  maximum_validation_reprojection_error_pixels: 5.0
+  allow_unverified_physical_measurements: false
   suppress_candidates_when_unreliable: true
+  camera_pose_mode: static
   world_longitudinal_axis: y
   world_longitudinal_direction: positive
+
+physical_measurements:
+  require_independent_validation: true
+  minimum_calibration_confidence: 0.70
+  disable_on_camera_pose_uncertain: true
+  disable_on_camera_pose_unavailable: true
+  disable_on_camera_pose_moved: true
+
+# Diagnostic only. This estimates apparent motion but does not stabilize frames.
+camera_motion:
+  mode: feature_based
+
+camera_pose_validation:
+  enabled: true
 
 right_lane_opportunity:
   mode: auto

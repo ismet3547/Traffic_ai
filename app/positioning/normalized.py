@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from app.config import RoadPositionConfig
-from app.models import CalibrationStatus, LaneObservation, RoadPosition
+from app.models import (
+    CalibrationQuality,
+    LaneObservation,
+    PhysicalMeasurementPermission,
+    RoadPosition,
+)
 
 
 class NormalizedImageRoadPositionEstimator:
@@ -19,28 +24,39 @@ class NormalizedImageRoadPositionEstimator:
     def __init__(
         self,
         config: RoadPositionConfig,
-        calibration_status: CalibrationStatus | None = None,
+        calibration_quality: CalibrationQuality | None = None,
     ) -> None:
         self._config = config
-        self._calibration_status = calibration_status or CalibrationStatus(
+        self._calibration_quality = calibration_quality or CalibrationQuality(
             mode="normalized",
-            valid=True,
-            reprojection_error_pixels=None,
-            confidence=0.65,
-            reason="physical calibration not configured",
+            matrix_valid=False,
+            numerically_stable=False,
+            validation_mode="NONE",
+            fit_reprojection_error_pixels=None,
+            validation_reprojection_error_pixels=None,
+            condition_metric=None,
+            confidence=0.0,
+            confidence_basis="not_calibrated",
+            reason_codes=("CALIBRATION_NOT_CONFIGURED",),
             world_units=None,
         )
 
     @property
-    def calibration_status(self) -> CalibrationStatus:
-        return self._calibration_status
+    def calibration_quality(self) -> CalibrationQuality:
+        return self._calibration_quality
+
+    @property
+    def calibration_status(self) -> CalibrationQuality:
+        return self._calibration_quality
 
     def estimate(
         self,
         observations: list[LaneObservation],
         frame_width: int,
         frame_height: int,
+        physical_permission: PhysicalMeasurementPermission | None = None,
     ) -> dict[int, RoadPosition]:
+        del physical_permission
         width = max(1, frame_width)
         height = max(1, frame_height)
         positions: dict[int, RoadPosition] = {}
@@ -61,8 +77,10 @@ class NormalizedImageRoadPositionEstimator:
                 calibrated=False,
                 image_position=(x, y),
                 normalized_position=(lateral, longitudinal),
-                world_position=None,
-                calibration_confidence=0.0,
+                world_position_m=None,
+                world_position_confidence=0.0,
+                physical_measurement_status="unavailable",
+                physical_measurement_reason_codes=("CALIBRATION_NOT_CONFIGURED",),
             )
         return positions
 

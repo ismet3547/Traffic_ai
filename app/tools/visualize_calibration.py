@@ -10,6 +10,8 @@ import numpy as np
 
 from app.config import load_config
 from app.lanes import LaneAssigner
+from app.models import CameraPoseStatus
+from app.physical_measurements import PhysicalMeasurementPolicy
 from app.positioning import HomographyRoadTransformer, build_road_coordinate_transformer
 
 LOGGER = logging.getLogger(__name__)
@@ -87,17 +89,58 @@ def main() -> int:
             cv2.LINE_AA,
         )
 
+    for index, point in enumerate(config.calibration.validation_image_points):
+        pixel = tuple(round(value) for value in point)
+        cv2.drawMarker(
+            preview,
+            pixel,
+            (255, 80, 220),
+            cv2.MARKER_CROSS,
+            14,
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            preview,
+            f"V{index}",
+            (pixel[0] + 8, pixel[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 80, 220),
+            1,
+            cv2.LINE_AA,
+        )
+
     if isinstance(transformer, HomographyRoadTransformer):
         _draw_world_grid(preview, transformer, config.calibration.world_points, cv2)
-    status = transformer.calibration_status
-    reprojection = (
-        f"{status.reprojection_error_pixels:.3f}"
-        if status.reprojection_error_pixels is not None
+    status = transformer.calibration_quality
+    permission = PhysicalMeasurementPolicy(
+        config.physical_measurements, config.calibration
+    ).evaluate(
+        status,
+        CameraPoseStatus(
+            status="unavailable",
+            translation_px=None,
+            rotation_deg=None,
+            confidence=0.0,
+            sample_count=0,
+            reason_codes=("SINGLE_FRAME_TOOL_CANNOT_VALIDATE_CAMERA_POSE",),
+        ),
+    )
+    fit = (
+        f"{status.fit_reprojection_error_pixels:.3f}"
+        if status.fit_reprojection_error_pixels is not None
+        else "N/A"
+    )
+    validation = (
+        f"{status.validation_reprojection_error_pixels:.3f}"
+        if status.validation_reprojection_error_pixels is not None
         else "N/A"
     )
     label = (
-        f"CALIBRATION {status.mode.upper()} valid={status.valid} "
-        f"confidence={status.confidence:.2f} reprojection={reprojection}px"
+        f"CALIBRATION {status.mode.upper()} matrix={status.matrix_valid} "
+        f"validation={status.validation_mode} fit={fit}px validation_error={validation}px "
+        f"confidence={status.confidence:.2f} physical={'ON' if permission.allowed else 'OFF'}"
     )
     cv2.rectangle(preview, (0, 0), (min(width, 900), 34), (30, 30, 30), -1)
     cv2.putText(
@@ -116,6 +159,30 @@ def main() -> int:
     if not cv2.imwrite(str(output_path), preview):
         raise RuntimeError(f"could not write preview: {output_path}")
     LOGGER.info("Saved calibration preview: %s", output_path)
+    LOGGER.info(
+        "Calibration diagnostics: matrix_valid=%s numerically_stable=%s "
+        "validation_mode=%s fit_error_px=%s validation_error_px=%s "
+        "condition_metric=%s confidence=%.2f basis=%s reasons=%s",
+        status.matrix_valid,
+        status.numerically_stable,
+        status.validation_mode,
+        status.fit_reprojection_error_pixels,
+        status.validation_reprojection_error_pixels,
+        status.condition_metric,
+        status.confidence,
+        status.confidence_basis,
+        ",".join(status.reason_codes) or "none",
+    )
+    LOGGER.info(
+        "Physical measurement permission: allowed=%s reasons=%s",
+        permission.allowed,
+        ",".join(permission.reason_codes) or "none",
+    )
+    if status.validation_mode == "FIT_POINTS_ONLY":
+        LOGGER.warning(
+            "Calibration matrix is mathematically solvable but physically unverified. "
+            "Physical speed/gap measurements are disabled by default."
+        )
     if args.show:
         cv2.imshow("Traffic AI calibration preview", preview)
         cv2.waitKey(0)

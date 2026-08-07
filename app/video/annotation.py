@@ -65,8 +65,10 @@ class DebugAnnotator:
 
         if traffic_context is not None:
             traffic = traffic_context.global_context
-            calibration = traffic.calibration_status
+            calibration = traffic.calibration_quality
             motion = traffic.camera_motion
+            pose = traffic.camera_pose
+            permission = traffic.physical_measurements
             calibration_label = (
                 f"{calibration.mode.upper()}/{_quality(calibration.confidence)}"
                 if calibration is not None
@@ -80,7 +82,9 @@ class DebugAnnotator:
             traffic_label = (
                 f"TRAFFIC: {traffic.congestion_level.value.upper()}  "
                 f"DENSITY: {traffic.traffic_density:.2f}  "
-                f"CALIBRATION: {calibration_label}  CAMERA MOTION: {motion_label}"
+                f"CALIBRATION: {calibration_label}  CAMERA MOTION: {motion_label}  "
+                f"POSE: {pose.status.upper() if pose else 'UNKNOWN'}  "
+                f"PHYSICAL: {'ON' if permission and permission.allowed else 'OFF'}"
             )
             self._label(output, traffic_label, (10, 24), (55, 55, 55))
 

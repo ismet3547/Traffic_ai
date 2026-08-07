@@ -108,6 +108,7 @@ class CandidateLifecycleState(str, Enum):
     ACCUMULATING = "accumulating"
     CANDIDATE_ACTIVE = "candidate_active"
     SUSPENDED = "suspended"
+    PENDING_CLOSE = "pending_close"
     CANCELLED = "cancelled"
     FINALIZED = "finalized"
 
@@ -136,8 +137,10 @@ class RoadPosition:
     calibrated: bool
     image_position: tuple[float, float] | None = None
     normalized_position: tuple[float, float] | None = None
-    world_position: tuple[float, float] | None = None
-    calibration_confidence: float = 0.0
+    world_position_m: tuple[float, float] | None = None
+    world_position_confidence: float = 0.0
+    physical_measurement_status: str = "unavailable"
+    physical_measurement_reason_codes: tuple[str, ...] = ()
 
     @property
     def coordinate_mode(self) -> str:
@@ -145,13 +148,38 @@ class RoadPosition:
 
 
 @dataclass(frozen=True, slots=True)
-class CalibrationStatus:
+class CalibrationQuality:
     mode: str
-    valid: bool
-    reprojection_error_pixels: float | None
+    matrix_valid: bool
+    numerically_stable: bool
+    validation_mode: str
+    fit_reprojection_error_pixels: float | None
+    validation_reprojection_error_pixels: float | None
+    condition_metric: float | None
     confidence: float
-    reason: str | None = None
+    confidence_basis: str
+    reason_codes: tuple[str, ...] = ()
     world_units: str | None = None
+
+    @property
+    def valid(self) -> bool:
+        return self.matrix_valid and self.numerically_stable
+
+    @property
+    def reprojection_error_pixels(self) -> float | None:
+        return (
+            self.validation_reprojection_error_pixels
+            if self.validation_reprojection_error_pixels is not None
+            else self.fit_reprojection_error_pixels
+        )
+
+    @property
+    def reason(self) -> str | None:
+        return ", ".join(self.reason_codes) if self.reason_codes else None
+
+
+# Import compatibility only; the Phase 3.1 model semantics are CalibrationQuality.
+CalibrationStatus = CalibrationQuality
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +191,26 @@ class CameraMotionEstimate:
     valid: bool
     level: str = "unknown"
     method: str = "none"
+    stabilization_applied: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CameraPoseStatus:
+    status: str
+    translation_px: float | None
+    rotation_deg: float | None
+    confidence: float
+    sample_count: int
+    stabilization_applied: bool = False
+    reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalMeasurementPermission:
+    allowed: bool
+    confidence: float
+    status: str
+    reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +222,8 @@ class SpeedEstimate:
     speed_mode: str
     normalized_motion_rate: float | None = None
     sample_count: int = 0
+    physical_measurement_status: str = "unavailable"
+    reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +273,16 @@ class GlobalTrafficContext:
     average_normalized_motion_per_second: float | None
     confidence: float
     coordinate_system: str = "normalized_image"
-    calibration_status: CalibrationStatus | None = None
+    calibration_quality: CalibrationQuality | None = None
     camera_motion: CameraMotionEstimate | None = None
+    camera_pose: CameraPoseStatus | None = None
+    physical_measurements: PhysicalMeasurementPermission | None = None
+
+    @property
+    def calibration_status(self) -> CalibrationQuality | None:
+        """Phase 3 compatibility alias."""
+
+        return self.calibration_quality
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +346,8 @@ class VehicleRuleStatus:
     speed_mode: str = "unavailable_uncalibrated"
     coordinate_mode: str = "normalized_image"
     right_lane_gap: GapEstimate | None = None
+    physical_measurement_status: str = "unavailable"
+    physical_measurement_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +360,13 @@ class CandidateDecisionRecord:
 @dataclass(frozen=True, slots=True)
 class CandidateTransition:
     transition: Literal[
-        "started", "suspended", "resumed", "cancelled", "finalized", "ended"
+        "started",
+        "suspended",
+        "resumed",
+        "pending_close",
+        "cancelled",
+        "finalized",
+        "ended",
     ]
     track_id: int
     lane_id: str
@@ -322,11 +388,15 @@ class CandidateTransition:
     finalized_at: float | None = None
     cancelled_at: float | None = None
     cancellation_reason: str | None = None
+    close_requested_at: float | None = None
+    close_reason: str | None = None
     decision_history: tuple[CandidateDecisionRecord, ...] = ()
     position: RoadPosition | None = None
     speed_estimate: SpeedEstimate | None = None
-    calibration_status: CalibrationStatus | None = None
+    calibration_quality: CalibrationQuality | None = None
     camera_motion: CameraMotionEstimate | None = None
+    camera_pose: CameraPoseStatus | None = None
+    physical_measurements: PhysicalMeasurementPermission | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +443,10 @@ class TrafficContextMetadata(BaseModel):
     right_lane_opportunity_mode: str = "unavailable"
     right_lane_front_gap: GapEstimateMetadata | None = None
     right_lane_rear_gap: GapEstimateMetadata | None = None
+    right_lane_front_gap_m: float | None = Field(default=None, ge=0)
+    right_lane_rear_gap_m: float | None = Field(default=None, ge=0)
+    right_lane_front_gap_normalized: float | None = Field(default=None, ge=0)
+    right_lane_rear_gap_normalized: float | None = Field(default=None, ge=0)
 
 
 class GapEstimateMetadata(BaseModel):
@@ -384,14 +458,19 @@ class GapEstimateMetadata(BaseModel):
     coordinate_mode: str
 
 
-class CalibrationStatusMetadata(BaseModel):
+class CalibrationQualityMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: str
-    valid: bool
-    reprojection_error_pixels: float | None = Field(default=None, ge=0)
+    matrix_valid: bool
+    numerically_stable: bool
+    validation_mode: str
+    fit_reprojection_error_pixels: float | None = Field(default=None, ge=0)
+    validation_reprojection_error_pixels: float | None = Field(default=None, ge=0)
+    condition_metric: float | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0, le=1)
-    reason: str | None = None
+    confidence_basis: str
+    reason_codes: list[str] = Field(default_factory=list)
     world_units: str | None = None
 
 
@@ -405,6 +484,28 @@ class CameraMotionMetadata(BaseModel):
     valid: bool
     level: str
     method: str
+    stabilization_applied: bool = False
+
+
+class CameraPoseMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    translation_px: float | None = Field(default=None, ge=0)
+    rotation_deg: float | None = None
+    confidence: float = Field(ge=0, le=1)
+    sample_count: int = Field(ge=0)
+    stabilization_applied: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class PhysicalMeasurementMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: bool
+    confidence: float = Field(ge=0, le=1)
+    status: str
+    reason_codes: list[str] = Field(default_factory=list)
 
 
 class SpeedEstimateMetadata(BaseModel):
@@ -416,6 +517,8 @@ class SpeedEstimateMetadata(BaseModel):
     speed_mode: str
     normalized_motion_rate: float | None = Field(default=None, ge=0)
     sample_count: int = Field(default=0, ge=0)
+    physical_measurement_status: str = "unavailable"
+    reason_codes: list[str] = Field(default_factory=list)
 
 
 class CandidateDecisionMetadata(BaseModel):
@@ -435,6 +538,8 @@ class CandidateLifecycleMetadata(BaseModel):
     finalized_at: float | None = Field(default=None, ge=0)
     cancelled_at: float | None = Field(default=None, ge=0)
     cancellation_reason: str | None = None
+    close_requested_at: float | None = Field(default=None, ge=0)
+    close_reason: str | None = None
 
 
 class OvertakingAssessmentMetadata(BaseModel):
@@ -454,7 +559,7 @@ class EventMetadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "3.0"
+    schema_version: str = "3.1"
     event_id: str
     event_type: Literal["left_lane_review_candidate"] = "left_lane_review_candidate"
     review_status: Literal[
@@ -484,10 +589,12 @@ class EventMetadata(BaseModel):
     )
     candidate_lifecycle: CandidateLifecycleMetadata | None = None
     decision_history: list[CandidateDecisionMetadata] = Field(default_factory=list)
-    calibration_status: CalibrationStatusMetadata | None = None
+    calibration: CalibrationQualityMetadata | None = None
     camera_motion: CameraMotionMetadata | None = None
+    camera_pose: CameraPoseMetadata | None = None
+    physical_measurements: PhysicalMeasurementMetadata | None = None
     speed_estimate: SpeedEstimateMetadata | None = None
     image_position: tuple[float, float] | None = None
     normalized_position: tuple[float, float] | None = None
-    world_position: tuple[float, float] | None = None
+    world_position_m: tuple[float, float] | None = None
     coordinate_mode: str = "normalized_image"

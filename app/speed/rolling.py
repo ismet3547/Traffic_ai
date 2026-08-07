@@ -11,7 +11,7 @@ from statistics import median
 import numpy as np
 
 from app.config import SpeedEstimationConfig
-from app.models import CameraMotionEstimate, RoadPosition, SpeedEstimate
+from app.models import PhysicalMeasurementPermission, RoadPosition, SpeedEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,12 +32,12 @@ class RollingSpeedEstimator:
         self,
         timestamp_seconds: float,
         positions: dict[int, RoadPosition],
-        camera_motion: CameraMotionEstimate | None = None,
+        physical_permission: PhysicalMeasurementPermission | None = None,
     ) -> dict[int, SpeedEstimate]:
         estimates: dict[int, SpeedEstimate] = {}
         for track_id, position in positions.items():
             estimates[track_id] = self._update_track(
-                timestamp_seconds, position, camera_motion
+                timestamp_seconds, position, physical_permission
             )
         cutoff = timestamp_seconds - self._config.maximum_window_seconds * 2.0
         for track_id, history in list(self._histories.items()):
@@ -53,7 +53,7 @@ class RollingSpeedEstimator:
         self,
         timestamp_seconds: float,
         position: RoadPosition,
-        camera_motion: CameraMotionEstimate | None,
+        physical_permission: PhysicalMeasurementPermission | None,
     ) -> SpeedEstimate:
         track_id = position.track_id
         history = self._histories.setdefault(track_id, deque())
@@ -66,11 +66,15 @@ class RollingSpeedEstimator:
 
         sample = _PositionSample(
             timestamp_seconds=timestamp_seconds,
-            world_xy=position.world_position,
+            world_xy=(
+                position.world_position_m
+                if physical_permission is not None and physical_permission.allowed
+                else None
+            ),
             normalized_xy=position.normalized_position,
         )
-        if position.world_position is not None and history and history[-1].world_xy:
-            jump = math.dist(position.world_position, history[-1].world_xy)
+        if sample.world_xy is not None and history and history[-1].world_xy:
+            jump = math.dist(sample.world_xy, history[-1].world_xy)
             if jump > self._config.max_position_jump_meters:
                 history.clear()
                 history.append(sample)
@@ -82,24 +86,29 @@ class RollingSpeedEstimator:
 
         if not self._config.enabled:
             return self._unavailable(track_id, "disabled", len(history))
-        if (
-            camera_motion is not None
-            and camera_motion.valid
-            and camera_motion.level == "high"
-        ):
-            return self._unavailable(
-                track_id, "unavailable_camera_motion_high", len(history)
-            )
-        if not position.calibrated or position.world_position is None:
+        if physical_permission is None or not physical_permission.allowed:
             rate = self._normalized_rate(history)
             return SpeedEstimate(
                 track_id=track_id,
                 speed_mps=None,
                 speed_kph=None,
                 speed_confidence=0.0,
-                speed_mode="unavailable_uncalibrated",
+                speed_mode="unavailable_physical_measurements",
                 normalized_motion_rate=rate,
                 sample_count=len(history),
+                physical_measurement_status="unavailable",
+                reason_codes=(
+                    physical_permission.reason_codes
+                    if physical_permission is not None
+                    else ("PHYSICAL_PERMISSION_REQUIRED",)
+                ),
+            )
+        if not position.calibrated or position.world_position_m is None:
+            return self._unavailable(
+                track_id,
+                "unavailable_transform",
+                len(history),
+                ("WORLD_POSITION_UNAVAILABLE",),
             )
         if (
             len(history) < self._config.minimum_samples
@@ -120,7 +129,8 @@ class RollingSpeedEstimator:
         coverage = min(1.0, span / self._config.minimum_window_seconds)
         sample_quality = min(1.0, len(history) / self._config.minimum_samples)
         confidence = min(
-            1.0, position.calibration_confidence * coverage * sample_quality
+            1.0,
+            position.world_position_confidence * coverage * sample_quality,
         )
         return SpeedEstimate(
             track_id=track_id,
@@ -130,6 +140,8 @@ class RollingSpeedEstimator:
             speed_mode="approximate_calibrated",
             normalized_motion_rate=self._normalized_rate(history),
             sample_count=len(history),
+            physical_measurement_status="available_approximate",
+            reason_codes=(),
         )
 
     def _world_speed(self, history: deque[_PositionSample]) -> float | None:
@@ -176,7 +188,12 @@ class RollingSpeedEstimator:
         return median(rates) if rates else None
 
     @staticmethod
-    def _unavailable(track_id: int, mode: str, samples: int) -> SpeedEstimate:
+    def _unavailable(
+        track_id: int,
+        mode: str,
+        samples: int,
+        reasons: tuple[str, ...] = (),
+    ) -> SpeedEstimate:
         return SpeedEstimate(
             track_id=track_id,
             speed_mps=None,
@@ -185,4 +202,6 @@ class RollingSpeedEstimator:
             speed_mode=mode,
             normalized_motion_rate=None,
             sample_count=samples,
+            physical_measurement_status="unavailable",
+            reason_codes=reasons or (mode.upper(),),
         )

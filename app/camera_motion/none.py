@@ -1,4 +1,4 @@
-"""Fixed-camera implementation with no estimated motion."""
+"""Disabled diagnostic: camera stability is unavailable, never assumed."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ class NoCameraMotionEstimator:
             dx=0.0,
             dy=0.0,
             rotation_degrees=0.0,
-            confidence=1.0,
-            valid=True,
-            level="low",
-            method="none_fixed_camera",
+            confidence=0.0,
+            valid=False,
+            level="unknown",
+            method="not_configured_no_motion_measurement",
+            stabilization_applied=False,
         )

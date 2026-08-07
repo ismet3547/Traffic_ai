@@ -17,7 +17,9 @@ def test_default_config_loads() -> None:
     assert config.right_lane_opportunity.front_gap_normalized == 0.08
     assert config.calibration.mode == "normalized"
     assert config.speed_estimation.enabled
-    assert config.candidate_lifecycle.finalize_after_seconds == 5.0
+    assert config.candidate_lifecycle.finalize_after_seconds is None
+    assert config.candidate_lifecycle.evidence_settle_seconds == 2.0
+    assert config.physical_measurements.require_independent_validation
 
 
 def test_calibrated_example_config_loads() -> None:

@@ -104,6 +104,7 @@ class FeatureBasedCameraMotionEstimator:
             valid=valid,
             level=level if valid else "unknown",
             method="feature_based_lk_affine_experimental",
+            stabilization_applied=False,
         )
 
 
@@ -116,4 +117,5 @@ def _invalid(method: str) -> CameraMotionEstimate:
         valid=False,
         level="unknown",
         method=method,
+        stabilization_applied=False,
     )

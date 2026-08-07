@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from app.camera_motion import CameraMotionEstimator
+from app.camera_motion import CameraMotionEstimator, CameraPoseValidator
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import Detector
 from app.events import EventArtifactWriter
 from app.lanes import LaneAssigner
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import OvertakingClearancePolicy
+from app.physical_measurements import PhysicalMeasurementPolicy
 from app.positioning import RoadCoordinateTransformer
 from app.rules import LeftLaneRuleEngine
 from app.speed import SpeedEstimator
@@ -41,6 +42,8 @@ class TrafficAnalysisPipeline:
         road_position_estimator: RoadCoordinateTransformer,
         speed_estimator: SpeedEstimator,
         camera_motion_estimator: CameraMotionEstimator,
+        camera_pose_validator: CameraPoseValidator,
+        physical_measurement_policy: PhysicalMeasurementPolicy,
         motion_history: MotionHistoryStore,
         traffic_context_analyzer: TrafficContextAnalyzer,
         right_lane_opportunities: RightLaneOpportunityTracker,
@@ -58,6 +61,8 @@ class TrafficAnalysisPipeline:
         self._road_position_estimator = road_position_estimator
         self._speed_estimator = speed_estimator
         self._camera_motion_estimator = camera_motion_estimator
+        self._camera_pose_validator = camera_pose_validator
+        self._physical_measurement_policy = physical_measurement_policy
         self._motion_history = motion_history
         self._traffic_context_analyzer = traffic_context_analyzer
         self._right_lane_opportunities = right_lane_opportunities
@@ -77,6 +82,13 @@ class TrafficAnalysisPipeline:
                 camera_motion = self._camera_motion_estimator.update(
                     packet.image, [vehicle.bbox for vehicle in vehicles]
                 )
+                camera_pose = self._camera_pose_validator.update(
+                    packet.timestamp_seconds, camera_motion
+                )
+                physical_permission = self._physical_measurement_policy.evaluate(
+                    self._road_position_estimator.calibration_quality,
+                    camera_pose,
+                )
                 raw_observations = self._lane_assigner.assign(
                     vehicles,
                     frame_width=self._source.info.width,
@@ -90,9 +102,10 @@ class TrafficAnalysisPipeline:
                     observations,
                     frame_width=self._source.info.width,
                     frame_height=self._source.info.height,
+                    physical_permission=physical_permission,
                 )
                 speeds = self._speed_estimator.update(
-                    packet.timestamp_seconds, positions, camera_motion
+                    packet.timestamp_seconds, positions, physical_permission
                 )
                 traffic_context = self._traffic_context_analyzer.analyze(
                     packet.timestamp_seconds,
@@ -101,6 +114,8 @@ class TrafficAnalysisPipeline:
                     self._motion_history,
                     calibration_status=self._road_position_estimator.calibration_status,
                     camera_motion=camera_motion,
+                    camera_pose=camera_pose,
+                    physical_measurements=physical_permission,
                     speeds=speeds,
                 )
                 traffic_context = self._right_lane_opportunities.update(

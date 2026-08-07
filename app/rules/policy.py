@@ -47,15 +47,15 @@ class ContextualLeftLaneDecisionPolicy:
         overtaking: OvertakingAssessment | None,
         speed: SpeedEstimate | None = None,
     ) -> CandidateDecision:
-        calibration = traffic.calibration_status if traffic is not None else None
+        calibration = traffic.calibration_quality if traffic is not None else None
+        permission = traffic.physical_measurements if traffic is not None else None
         if (
             self._calibration.suppress_candidates_when_unreliable
             and calibration is not None
             and calibration.mode in {"homography", "homography_fallback"}
             and (
                 not calibration.valid
-                or calibration.confidence
-                < self._calibration.minimum_confidence_for_physical_measurements
+                or (permission is not None and not permission.allowed)
             )
         ):
             return _suppressed(
@@ -65,14 +65,17 @@ class ContextualLeftLaneDecisionPolicy:
             )
         if (
             traffic is not None
-            and traffic.camera_motion is not None
-            and traffic.camera_motion.valid
-            and traffic.camera_motion.level == "high"
+            and traffic.camera_pose is not None
+            and traffic.camera_pose.status
+            in {
+                "uncertain",
+                "moved",
+            }
         ):
             return _suppressed(
                 BehaviorClassification.INSUFFICIENT_EVIDENCE,
                 SuppressionReason.CAMERA_MOTION_HIGH,
-                traffic.camera_motion.confidence,
+                traffic.camera_pose.confidence,
             )
         if speed is not None and speed.speed_mode in {
             "rejected_position_jump",

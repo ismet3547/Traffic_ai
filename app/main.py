@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.camera_motion import build_camera_motion_estimator
+from app.camera_motion import CameraPoseValidator, build_camera_motion_estimator
 from app.config import AppConfig, load_config
 from app.context import RightLaneOpportunityTracker, TrafficContextAnalyzer
 from app.detection import UltralyticsDetector
@@ -15,6 +15,7 @@ from app.events import EventArtifactWriter
 from app.lanes import LaneAssigner
 from app.motion import LaneTransitionDetector, MotionHistoryStore
 from app.overtaking import ContextualOvertakingPolicy, NoOvertakingPolicy
+from app.physical_measurements import PhysicalMeasurementPolicy
 from app.pipeline import TrafficAnalysisPipeline
 from app.positioning import build_road_coordinate_transformer
 from app.rules import ContextualLeftLaneDecisionPolicy, LeftLaneRuleEngine
@@ -70,16 +71,29 @@ def main() -> int:
         road_position_estimator = build_road_coordinate_transformer(
             config.calibration, config.road_position
         )
-        calibration_status = road_position_estimator.calibration_status
+        calibration_status = road_position_estimator.calibration_quality
         LOGGER.info(
-            "Calibration: mode=%s valid=%s confidence=%.2f reason=%s",
+            "Calibration: mode=%s matrix_valid=%s numerically_stable=%s "
+            "validation=%s confidence=%.2f basis=%s reasons=%s",
             calibration_status.mode,
-            calibration_status.valid,
+            calibration_status.matrix_valid,
+            calibration_status.numerically_stable,
+            calibration_status.validation_mode,
             calibration_status.confidence,
-            calibration_status.reason or "none",
+            calibration_status.confidence_basis,
+            ",".join(calibration_status.reason_codes) or "none",
         )
+        if calibration_status.validation_mode == "FIT_POINTS_ONLY":
+            LOGGER.warning(
+                "Homography is mathematically solvable but physically unverified; "
+                "physical speed/gap output is disabled by default"
+            )
         speed_estimator = RollingSpeedEstimator(config.speed_estimation)
         camera_motion_estimator = build_camera_motion_estimator(config.camera_motion)
+        camera_pose_validator = CameraPoseValidator(config.camera_pose_validation)
+        physical_measurement_policy = PhysicalMeasurementPolicy(
+            config.physical_measurements, config.calibration
+        )
         motion_history = MotionHistoryStore(config.traffic_context)
         traffic_context_analyzer = TrafficContextAnalyzer(
             config.lanes.lane_ids_left_to_right,
@@ -134,6 +148,8 @@ def main() -> int:
             road_position_estimator=road_position_estimator,
             speed_estimator=speed_estimator,
             camera_motion_estimator=camera_motion_estimator,
+            camera_pose_validator=camera_pose_validator,
+            physical_measurement_policy=physical_measurement_policy,
             motion_history=motion_history,
             traffic_context_analyzer=traffic_context_analyzer,
             right_lane_opportunities=right_lane_opportunities,

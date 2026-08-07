@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from app.config import CalibrationConfig, RoadPositionConfig
-from app.models import CalibrationStatus
+from app.models import CalibrationQuality
 
 from .base import RoadCoordinateTransformer
 from .homography import CalibrationError, HomographyRoadTransformer
@@ -30,12 +30,17 @@ def build_road_coordinate_transformer(
         )
         return NormalizedImageRoadPositionEstimator(
             road_position,
-            CalibrationStatus(
+            CalibrationQuality(
                 mode="homography_fallback",
-                valid=False,
-                reprojection_error_pixels=None,
+                matrix_valid=False,
+                numerically_stable=False,
+                validation_mode="NONE",
+                fit_reprojection_error_pixels=None,
+                validation_reprojection_error_pixels=None,
+                condition_metric=None,
                 confidence=0.0,
-                reason="configured homography failed validation; normalized fallback active",
+                confidence_basis="homography_initialization_failed",
+                reason_codes=("HOMOGRAPHY_INITIALIZATION_FAILED",),
                 world_units=None,
             ),
         )

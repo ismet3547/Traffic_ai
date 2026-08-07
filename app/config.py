@@ -105,12 +105,23 @@ class CalibrationConfig(StrictModel):
     world_units: Literal["meters"] = "meters"
     image_points: list[tuple[float, float]] = Field(default_factory=list)
     world_points: list[tuple[float, float]] = Field(default_factory=list)
+    validation_image_points: list[tuple[float, float]] = Field(default_factory=list)
+    validation_world_points: list[tuple[float, float]] = Field(default_factory=list)
     fallback_to_normalized: bool = True
     maximum_reprojection_error_pixels: float = Field(default=5.0, gt=0)
-    minimum_confidence_for_physical_measurements: float = Field(
-        default=0.55, ge=0, le=1
+    maximum_validation_reprojection_error_pixels: float = Field(default=5.0, gt=0)
+    maximum_condition_number: float = Field(default=1_000_000.0, gt=1)
+    minimum_image_control_area_pixels2: float = Field(default=100.0, gt=0)
+    minimum_world_control_area_units2: float = Field(default=0.5, gt=0)
+    maximum_absolute_world_coordinate: float = Field(default=100_000.0, gt=0)
+    allow_unverified_physical_measurements: bool = False
+    # Deprecated Phase 3 input retained so existing YAML still loads. The
+    # centralized physical_measurements policy owns the effective threshold.
+    minimum_confidence_for_physical_measurements: float | None = Field(
+        default=None, ge=0, le=1
     )
     suppress_candidates_when_unreliable: bool = False
+    camera_pose_mode: Literal["static"] = "static"
     world_longitudinal_axis: Literal["x", "y"] = "y"
     world_longitudinal_direction: Literal["positive", "negative"] = "positive"
 
@@ -132,6 +143,54 @@ class CalibrationConfig(StrictModel):
                 raise ValueError(f"{name} must not contain duplicate points")
             if not _contains_non_collinear_triplet(points):
                 raise ValueError(f"{name} are degenerate (all points are collinear)")
+        if (
+            _convex_hull_area(self.image_points)
+            < self.minimum_image_control_area_pixels2
+        ):
+            raise ValueError("image control-point area is near-degenerate")
+        if (
+            _convex_hull_area(self.world_points)
+            < self.minimum_world_control_area_units2
+        ):
+            raise ValueError("world control-point area is near-degenerate")
+        if len(self.validation_image_points) != len(self.validation_world_points):
+            raise ValueError(
+                "validation_image_points and validation_world_points must have equal length"
+            )
+        if any(
+            abs(value) > self.maximum_absolute_world_coordinate
+            for point in self.world_points + self.validation_world_points
+            for value in point
+        ):
+            raise ValueError("world calibration coordinate exceeds configured bound")
+        return self
+
+
+class PhysicalMeasurementsConfig(StrictModel):
+    require_independent_validation: bool = True
+    minimum_calibration_confidence: float = Field(default=0.70, ge=0, le=1)
+    disable_on_camera_pose_uncertain: bool = True
+    disable_on_camera_pose_unavailable: bool = True
+    disable_on_camera_pose_moved: bool = True
+
+
+class CameraPoseValidationConfig(StrictModel):
+    enabled: bool = True
+    minimum_samples: int = Field(default=5, ge=1)
+    translation_noise_floor_px: float = Field(default=0.35, ge=0)
+    rotation_noise_floor_deg: float = Field(default=0.03, ge=0)
+    translation_warning_px: float = Field(default=1.5, gt=0)
+    translation_invalid_px: float = Field(default=3.0, gt=0)
+    rotation_warning_deg: float = Field(default=0.15, gt=0)
+    rotation_invalid_deg: float = Field(default=0.35, gt=0)
+    persistence_seconds: float = Field(default=0.5, ge=0)
+
+    @model_validator(mode="after")
+    def validate_pose_thresholds(self) -> CameraPoseValidationConfig:
+        if self.translation_warning_px >= self.translation_invalid_px:
+            raise ValueError("translation warning must be below invalid threshold")
+        if self.rotation_warning_deg >= self.rotation_invalid_deg:
+            raise ValueError("rotation warning must be below invalid threshold")
         return self
 
 
@@ -164,7 +223,11 @@ class CameraMotionConfig(StrictModel):
 class CandidateLifecycleConfig(StrictModel):
     invalidation_grace_seconds: float = Field(default=2.0, ge=0)
     suspension_grace_seconds: float = Field(default=3.0, ge=0)
-    finalize_after_seconds: float = Field(default=5.0, ge=0)
+    # Accepted for Phase 3 config compatibility but no longer finalizes events.
+    finalize_after_seconds: float | None = Field(default=None, ge=0)
+    evidence_settle_seconds: float = Field(default=2.0, ge=0)
+    max_event_duration_seconds: float = Field(default=30.0, gt=0)
+    track_loss_close_seconds: float = Field(default=1.5, ge=0)
     restart_cooldown_seconds: float = Field(default=1.5, ge=0)
     maximum_decision_history_entries: int = Field(default=32, ge=4, le=256)
 
@@ -266,10 +329,16 @@ class AppConfig(StrictModel):
     lanes: LanesConfig
     road_position: RoadPositionConfig = Field(default_factory=RoadPositionConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    physical_measurements: PhysicalMeasurementsConfig = Field(
+        default_factory=PhysicalMeasurementsConfig
+    )
     speed_estimation: SpeedEstimationConfig = Field(
         default_factory=SpeedEstimationConfig
     )
     camera_motion: CameraMotionConfig = Field(default_factory=CameraMotionConfig)
+    camera_pose_validation: CameraPoseValidationConfig = Field(
+        default_factory=CameraPoseValidationConfig
+    )
     candidate_lifecycle: CandidateLifecycleConfig = Field(
         default_factory=CandidateLifecycleConfig
     )
@@ -316,3 +385,41 @@ def _contains_non_collinear_triplet(points: list[tuple[float, float]]) -> bool:
                 if abs(twice_area) > 1e-9:
                     return True
     return False
+
+
+def _convex_hull_area(points: list[tuple[float, float]]) -> float:
+    """Return the area of the 2D convex hull without optional dependencies."""
+
+    ordered = sorted(set(points))
+    if len(ordered) < 3:
+        return 0.0
+
+    def cross(
+        origin: tuple[float, float],
+        first: tuple[float, float],
+        second: tuple[float, float],
+    ) -> float:
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (
+            first[1] - origin[1]
+        ) * (second[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    hull = lower[:-1] + upper[:-1]
+    return (
+        abs(
+            sum(
+                x1 * y2 - y1 * x2
+                for (x1, y1), (x2, y2) in zip(hull, hull[1:] + hull[:1], strict=True)
+            )
+        )
+        / 2.0
+    )

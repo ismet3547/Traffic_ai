@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.models import CalibrationStatus, LaneObservation, RoadPosition
+from app.models import (
+    CalibrationQuality,
+    LaneObservation,
+    PhysicalMeasurementPermission,
+    RoadPosition,
+)
 
 
 class RoadCoordinateTransformer(Protocol):
@@ -15,13 +20,17 @@ class RoadCoordinateTransformer(Protocol):
     def calibrated(self) -> bool: ...
 
     @property
-    def calibration_status(self) -> CalibrationStatus: ...
+    def calibration_quality(self) -> CalibrationQuality: ...
+
+    @property
+    def calibration_status(self) -> CalibrationQuality: ...
 
     def estimate(
         self,
         observations: list[LaneObservation],
         frame_width: int,
         frame_height: int,
+        physical_permission: PhysicalMeasurementPermission | None = None,
     ) -> dict[int, RoadPosition]:
         """Estimate comparable road positions for the current frame."""
         ...

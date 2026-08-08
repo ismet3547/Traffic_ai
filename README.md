@@ -579,6 +579,18 @@ Pilot issues have one centrally assigned severity: `BLOCKER`, `WARNING`, or `INF
 
 Terminal derivation consumes both the evidence statuses and the classified current blocker set. A current blocker returns a non-terminal state such as `BASELINE_FROZEN` while retaining a still-readable historical decision in status. `pilot_executed` is true only for a terminal state with zero active blockers; the status model independently enforces the same invariant. Changing current production-config content from the identity frozen in baseline 0 produces `PILOT_BASELINE_STALE`.
 
+### Phase 4.3.3 local source identity
+
+Local source presence is not sufficient. The local video bytes must match the source SHA-256 registered during intake. Pilot status first compares the current byte size with the intake record and, only when it matches, computes a streaming SHA-256. A missing source reports `LOCAL_VIDEO_MISSING`; an existing file with different bytes reports the completion blocker `LOCAL_VIDEO_SOURCE_IDENTITY_MISMATCH`. Prediction-cache identity checks remain separate and mandatory.
+
+Replacing a video at the same path invalidates current pilot eligibility until the registered source bytes are restored or the clip is explicitly re-registered. Status never rewrites the intake registry and never overwrites the frozen baseline or review evidence. Restoring the exact registered bytes can therefore restore a still-current terminal decision without regenerating historical review artifacts.
+
+Run the deterministic different-size, same-size, restoration, and deletion lifecycle with:
+
+```powershell
+python -m app.tools.run_pilot_source_identity_scenarios
+```
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:

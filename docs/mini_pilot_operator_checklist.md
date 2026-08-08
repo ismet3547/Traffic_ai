@@ -278,7 +278,11 @@ Use one or more `--condition` values for `CONDITIONAL_GO`; use one or more `--kn
 
 Current eligibility and historical evidence are separate. A valid historical GO decision does not override a current integrity blocker. A pilot cannot be COMPLETE while any completion-blocking issue is active.
 
-Before treating any terminal state as current, rerun `app.tools.pilot_status`. It rechecks source confirmation, benchmark authorization, permission, local source/config presence, frozen protocol identity, release/provenance, baseline currency, exact review evidence, and scale-up-decision currency. If one becomes invalid, the old evidence remains readable but current state falls back to a non-terminal state and `pilot_executed` becomes false.
+Before treating any terminal state as current, rerun `app.tools.pilot_status`. It rechecks source confirmation, benchmark authorization, permission, local source/config presence and identity, frozen protocol identity, release/provenance, baseline currency, exact review evidence, and scale-up-decision currency. If one becomes invalid, the old evidence remains readable but current state falls back to a non-terminal state and `pilot_executed` becomes false.
+
+Local source presence is not sufficient. The local video bytes must match the source SHA-256 registered during intake. The status check compares the registered byte size first and then computes a streaming SHA-256 when the size matches. `LOCAL_VIDEO_MISSING` identifies absence; `LOCAL_VIDEO_SOURCE_IDENTITY_MISMATCH` identifies an existing file with the wrong bytes.
+
+Replacing a video at the same path invalidates current pilot eligibility until the registered source bytes are restored or the clip is explicitly re-registered. Pilot status does not update the registry. Use the explicit intake/re-registration workflow when the intended source truly changes; otherwise restore the original registered bytes and rerun status.
 
 Status separates:
 

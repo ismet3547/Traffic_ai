@@ -198,6 +198,35 @@ class PilotIssue(StrictModel):
 PilotBlocker = PilotIssue
 
 
+LocalSourceIdentityReason = Literal[
+    "LOCAL_VIDEO_MISSING",
+    "LOCAL_VIDEO_UNREADABLE",
+    "LOCAL_VIDEO_SOURCE_IDENTITY_MISMATCH",
+    "REGISTERED_SOURCE_IDENTITY_INVALID",
+]
+
+
+class LocalSourceIdentityAssessment(StrictModel):
+    """Current local bytes compared with the immutable intake identity."""
+
+    present: bool
+    identity_verified: bool
+    expected_size_bytes: int | None = Field(default=None, ge=0)
+    actual_size_bytes: int | None = Field(default=None, ge=0)
+    expected_sha256: str | None = None
+    actual_sha256: str | None = None
+    reason_code: LocalSourceIdentityReason | None = None
+    details: str
+
+    @model_validator(mode="after")
+    def validate_result(self) -> LocalSourceIdentityAssessment:
+        if self.identity_verified != (self.reason_code is None):
+            raise ValueError(
+                "identity_verified must be true exactly when no reason code exists"
+            )
+        return self
+
+
 class PilotState(str, Enum):
     PREPARED = "PREPARED"
     REGISTERING_DATA = "REGISTERING_DATA"
@@ -1085,6 +1114,138 @@ def _resolve(base: Path, value: str) -> Path:
     return path.resolve() if path.is_absolute() else (base / path).resolve()
 
 
+def assess_local_source_identity(
+    path: str | Path,
+    record: VideoIntakeRecord,
+) -> LocalSourceIdentityAssessment:
+    """Verify a local file against its registered identity without changing either."""
+
+    local_path = Path(path).resolve()
+    expected_sha256 = record.source_video_sha256
+    expected_size = record.source_video_size_bytes
+    try:
+        present = local_path.is_file()
+    except OSError:
+        present = False
+    if not present:
+        return LocalSourceIdentityAssessment(
+            present=False,
+            identity_verified=False,
+            expected_size_bytes=(
+                expected_size
+                if isinstance(expected_size, int)
+                and not isinstance(expected_size, bool)
+                and expected_size >= 0
+                else None
+            ),
+            expected_sha256=(
+                expected_sha256 if isinstance(expected_sha256, str) else None
+            ),
+            reason_code="LOCAL_VIDEO_MISSING",
+            details="A readable local source path is required for inference.",
+        )
+    if not _registered_source_identity_is_valid(record):
+        return LocalSourceIdentityAssessment(
+            present=True,
+            identity_verified=False,
+            expected_size_bytes=(
+                expected_size
+                if isinstance(expected_size, int)
+                and not isinstance(expected_size, bool)
+                and expected_size >= 0
+                else None
+            ),
+            expected_sha256=(
+                expected_sha256 if isinstance(expected_sha256, str) else None
+            ),
+            reason_code="REGISTERED_SOURCE_IDENTITY_INVALID",
+            details=(
+                "The intake record has no trusted lowercase SHA-256 and positive "
+                "byte size; explicitly re-register the source before pilot use."
+            ),
+        )
+    try:
+        actual_size = local_path.stat().st_size
+    except OSError as exc:
+        return LocalSourceIdentityAssessment(
+            present=True,
+            identity_verified=False,
+            expected_size_bytes=expected_size,
+            expected_sha256=expected_sha256,
+            reason_code="LOCAL_VIDEO_UNREADABLE",
+            details=f"The local source could not be inspected: {type(exc).__name__}.",
+        )
+    if actual_size != expected_size:
+        return LocalSourceIdentityAssessment(
+            present=True,
+            identity_verified=False,
+            expected_size_bytes=expected_size,
+            actual_size_bytes=actual_size,
+            expected_sha256=expected_sha256,
+            reason_code="LOCAL_VIDEO_SOURCE_IDENTITY_MISMATCH",
+            details=(
+                "Local source identity mismatch: "
+                f"expected_size={expected_size} actual_size={actual_size} "
+                f"expected_sha256_prefix={expected_sha256[:12]} "
+                "actual_sha256_prefix=not_computed_size_mismatch."
+            ),
+        )
+    try:
+        actual_sha256 = streaming_file_sha256(local_path)
+    except OSError as exc:
+        return LocalSourceIdentityAssessment(
+            present=True,
+            identity_verified=False,
+            expected_size_bytes=expected_size,
+            actual_size_bytes=actual_size,
+            expected_sha256=expected_sha256,
+            reason_code="LOCAL_VIDEO_UNREADABLE",
+            details=f"The local source could not be hashed: {type(exc).__name__}.",
+        )
+    if actual_sha256 != expected_sha256:
+        return LocalSourceIdentityAssessment(
+            present=True,
+            identity_verified=False,
+            expected_size_bytes=expected_size,
+            actual_size_bytes=actual_size,
+            expected_sha256=expected_sha256,
+            actual_sha256=actual_sha256,
+            reason_code="LOCAL_VIDEO_SOURCE_IDENTITY_MISMATCH",
+            details=(
+                "Local source identity mismatch: "
+                f"expected_size={expected_size} actual_size={actual_size} "
+                f"expected_sha256_prefix={expected_sha256[:12]} "
+                f"actual_sha256_prefix={actual_sha256[:12]}."
+            ),
+        )
+    return LocalSourceIdentityAssessment(
+        present=True,
+        identity_verified=True,
+        expected_size_bytes=expected_size,
+        actual_size_bytes=actual_size,
+        expected_sha256=expected_sha256,
+        actual_sha256=actual_sha256,
+        details=(
+            "Local source bytes match the registered SHA-256 and byte size: "
+            f"sha256_prefix={actual_sha256[:12]} size={actual_size}."
+        ),
+    )
+
+
+def _registered_source_identity_is_valid(record: VideoIntakeRecord) -> bool:
+    sha256 = record.source_video_sha256
+    size = record.source_video_size_bytes
+    return (
+        record.source_identity_verified
+        and isinstance(sha256, str)
+        and len(sha256) == 64
+        and all(character in "0123456789abcdef" for character in sha256)
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and size > 0
+    )
+
+
 def _load_registry_status(path: Path, blockers: list[PilotBlocker]) -> IntakeRegistry:
     try:
         return read_json_model(path, IntakeRegistry)
@@ -1149,10 +1310,7 @@ def _check_registered_clip(
                 video_id=record.video_id,
             )
         )
-    if (
-        not selection.local_video_path
-        or not _resolve(base, selection.local_video_path).is_file()
-    ):
+    if not selection.local_video_path:
         blockers.append(
             PilotBlocker(
                 code="LOCAL_VIDEO_MISSING",
@@ -1160,6 +1318,18 @@ def _check_registered_clip(
                 video_id=record.video_id,
             )
         )
+    else:
+        source_identity = assess_local_source_identity(
+            _resolve(base, selection.local_video_path), record
+        )
+        if source_identity.reason_code is not None:
+            blockers.append(
+                PilotBlocker(
+                    code=source_identity.reason_code,
+                    details=source_identity.details,
+                    video_id=record.video_id,
+                )
+            )
     if (
         not selection.production_config_path
         or not _resolve(base, selection.production_config_path).is_file()

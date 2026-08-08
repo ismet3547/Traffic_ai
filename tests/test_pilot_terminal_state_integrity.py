@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 from app.benchmark.fingerprints import canonical_sha256, streaming_file_sha256
 from app.benchmark.models import PredictionDocument, VersionMetadata
 from app.benchmark.protocol import current_evaluation_protocol
+from app.dataset.agreement import compare_independent_annotations
 from app.dataset.io import write_json_model
 from app.dataset.models import (
     CANONICAL_AGREEMENT_PROTOCOL,
@@ -58,7 +60,13 @@ from app.dataset.pilot_review import (
     scale_up_decision_content_hash,
 )
 from app.dataset.release import build_dataset_release, export_adjudicated_annotation
-from tests.test_dataset_agreement_provenance import NOW, _bundle, _splits
+from tests.test_dataset_agreement_provenance import (
+    NOW,
+    _adjudication,
+    _annotation,
+    _record,
+    _splits,
+)
 
 FROZEN_AT = datetime(2026, 8, 8, tzinfo=timezone.utc)
 
@@ -72,13 +80,33 @@ class CompletePilotWorkspace:
     failure_review: FailureReviewDocument
     agreement_review: FirstAgreementReviewDocument
     decision: ScaleUpDecisionDocument
+    source_bytes: dict[str, bytes]
+
+
+def _registered_source_bytes(video_id: str) -> bytes:
+    return f"registered synthetic source bytes for {video_id}".encode()
+
+
+def _source_bound_bundle(video_id: str, index: int):
+    source_bytes = _registered_source_bytes(video_id)
+    record = _record(video_id, index).model_copy(
+        update={
+            "source_video_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "source_video_size_bytes": len(source_bytes),
+        }
+    )
+    first = _annotation(record, "annotator_a")
+    second = _annotation(record, "annotator_b")
+    agreement = compare_independent_annotations(first, second)
+    adjudication = _adjudication(first, second)
+    return record, first, second, agreement, adjudication
 
 
 def _complete_pilot(
     root: Path,
     decision: ScaleUpDecision = ScaleUpDecision.GO,
 ) -> CompletePilotWorkspace:
-    bundles = [_bundle(f"clip_{index}", 500 + index) for index in range(3)]
+    bundles = [_source_bound_bundle(f"clip_{index}", 500 + index) for index in range(3)]
     records = [item[0] for item in bundles]
     annotations = {item[0].video_id: [item[1], item[2]] for item in bundles}
     agreements = [item[3] for item in bundles]
@@ -86,10 +114,13 @@ def _complete_pilot(
     registry = IntakeRegistry(videos=records)
     write_json_model(registry, root / "registry.json")
     production_configs: dict[str, object] = {}
+    source_bytes = {
+        record.video_id: _registered_source_bytes(record.video_id) for record in records
+    }
     clips: list[PilotClipSelection] = []
     for record in records:
         video_path = root / f"{record.video_id}.mp4"
-        video_path.write_bytes(b"synthetic test placeholder")
+        video_path.write_bytes(source_bytes[record.video_id])
         config_path = root / f"{record.video_id}.yaml"
         config_path.write_text("detector: {}\n", encoding="utf-8")
         production_configs[record.video_id] = {"detector": {}}
@@ -289,6 +320,7 @@ def _complete_pilot(
         failure_review=failure_review,
         agreement_review=agreement_review,
         decision=scale_decision,
+        source_bytes=source_bytes,
     )
 
 

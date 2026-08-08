@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 from app.benchmark.fingerprints import canonical_sha256, streaming_file_sha256
 from app.benchmark.models import PredictionDocument, VersionMetadata
 from app.benchmark.protocol import current_evaluation_protocol
+from app.dataset.agreement import compare_independent_annotations
 from app.dataset.io import write_json_model
 from app.dataset.models import CANONICAL_AGREEMENT_PROTOCOL, IntakeRegistry
 from app.dataset.pilot import (
@@ -25,7 +27,13 @@ from app.dataset.pilot import (
     render_pilot_status,
 )
 from app.dataset.release import build_dataset_release, export_adjudicated_annotation
-from tests.test_dataset_agreement_provenance import NOW, _bundle, _splits
+from tests.test_dataset_agreement_provenance import (
+    NOW,
+    _adjudication,
+    _annotation,
+    _record,
+    _splits,
+)
 
 FROZEN_AT = datetime(2026, 8, 8, tzinfo=timezone.utc)
 
@@ -69,9 +77,19 @@ def _manifest(root: Path, *, with_clip: bool) -> tuple[PilotManifest, Path]:
 
 def _completed_workspace(root: Path):
     manifest, manifest_path = _manifest(root, with_clip=True)
-    record, first, second, agreement, adjudication = _bundle("real_clip", 301)
+    source_bytes = b"synthetic test placeholder"
+    record = _record("real_clip", 301).model_copy(
+        update={
+            "source_video_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "source_video_size_bytes": len(source_bytes),
+        }
+    )
+    first = _annotation(record, "annotator_a")
+    second = _annotation(record, "annotator_b")
+    agreement = compare_independent_annotations(first, second)
+    adjudication = _adjudication(first, second)
     write_json_model(IntakeRegistry(videos=[record]), root / "registry.json")
-    (root / "real_clip.mp4").write_bytes(b"synthetic test placeholder")
+    (root / "real_clip.mp4").write_bytes(source_bytes)
     (root / "production.yaml").write_text("detector: {}\n", encoding="utf-8")
     write_json_model(first, root / "annotations" / "annotator_a.json")
     write_json_model(second, root / "annotations" / "annotator_b.json")

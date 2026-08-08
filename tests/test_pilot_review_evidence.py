@@ -581,14 +581,24 @@ def test_pilot_state_is_derived_only_from_current_valid_artifacts() -> None:
 
     assert (
         derive_pilot_state(
-            counts, agreement_status, True, failure_status, decision_status
+            counts,
+            agreement_status,
+            True,
+            failure_status,
+            decision_status,
+            has_completion_blocker=False,
         )
         == PilotState.COMPLETE_GO
     )
     stale_failure = failure_status.model_copy(update={"complete": False})
     assert (
         derive_pilot_state(
-            counts, agreement_status, True, stale_failure, decision_status
+            counts,
+            agreement_status,
+            True,
+            stale_failure,
+            decision_status,
+            has_completion_blocker=False,
         )
         == PilotState.FAILURE_REVIEW_REQUIRED
     )

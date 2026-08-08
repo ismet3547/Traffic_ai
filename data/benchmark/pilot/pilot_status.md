@@ -36,6 +36,14 @@ No real scenario coverage is registered.
 
 - `NO_REAL_SOURCE_VIDEO_REGISTERED`: No real clip is selected in the pilot manifest; register and explicitly add the first legally usable source video.
 
+## Warnings
+
+- `MINI_PILOT_ACCURACY_WARNING`: Mini-pilot sample size is too small for production accuracy claims.
+
+## Information
+
+No informational notices.
+
 ## Scale-up recommendation
 
 `NOT_ASSESSED` — a real end-to-end mini pilot has not yet supplied evidence for a GO/NO-GO decision.

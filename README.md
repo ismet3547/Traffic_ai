@@ -571,6 +571,14 @@ python -m app.tools.run_pilot_review_scenarios
 
 The status command reports the explicit pilot state and nested baseline, agreement-review, failure-coverage, and decision validity. The terminal states are `COMPLETE_GO`, `COMPLETE_CONDITIONAL_GO`, and `COMPLETE_NO_GO`; none is reachable from a manifest checkbox. Post-hoc tools expose model failures only after the existing locked-GT and immutable-baseline gates.
 
+### Phase 4.3.2 fail-closed terminal states
+
+Current eligibility and historical evidence are separate. A valid historical GO decision does not override a current integrity blocker. A pilot cannot be COMPLETE while any completion-blocking issue is active.
+
+Pilot issues have one centrally assigned severity: `BLOCKER`, `WARNING`, or `INFO`. Unknown future issue codes default to `BLOCKER`. Current source confirmation, permission, benchmark authorization, local source/config presence, frozen protocol identity, dataset/release/provenance, baseline currency, annotation/agreement/adjudication integrity, exact review coverage, review staleness, and decision staleness are completion-blocking. The mini-pilot accuracy caveat is a warning, and ignored legacy manifest fields are informational.
+
+Terminal derivation consumes both the evidence statuses and the classified current blocker set. A current blocker returns a non-terminal state such as `BASELINE_FROZEN` while retaining a still-readable historical decision in status. `pilot_executed` is true only for a terminal state with zero active blockers; the status model independently enforces the same invariant. Changing current production-config content from the identity frozen in baseline 0 produces `PILOT_BASELINE_STALE`.
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:

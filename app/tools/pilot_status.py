@@ -67,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
     for blocker in status.blockers:
         scope = f" video_id={blocker.video_id}" if blocker.video_id else ""
         print(f"BLOCKER {blocker.code}{scope}: {blocker.details}")
+    for warning in status.warnings:
+        scope = f" video_id={warning.video_id}" if warning.video_id else ""
+        print(f"WARNING {warning.code}{scope}: {warning.details}")
+    for notice in status.information:
+        scope = f" video_id={notice.video_id}" if notice.video_id else ""
+        print(f"INFO {notice.code}{scope}: {notice.details}")
     return 2 if args.require_ready and status.blockers else 0
 
 

@@ -272,4 +272,18 @@ python -m app.tools.record_scale_up_decision `
 
 Use one or more `--condition` values for `CONDITIONAL_GO`; use one or more `--known-blocker` values for `NO_GO`. The command refuses missing/stale baseline, failure-review, agreement-review, release, or benchmark evidence. Any referenced artifact change invalidates the old decision.
 
-**Pilot completion is derived from review artifacts; it cannot be declared by editing a status flag.** Legacy `failure_review_completed`, `first_agreement_review_video_ids`, and `scale_up_recommendation` manifest values are ignored and reported as migration blockers.
+**Pilot completion is derived from review artifacts; it cannot be declared by editing a status flag.** Legacy `failure_review_completed`, `first_agreement_review_video_ids`, and `scale_up_recommendation` manifest values are ignored and reported as informational migration notices.
+
+## Current terminal-state eligibility
+
+Current eligibility and historical evidence are separate. A valid historical GO decision does not override a current integrity blocker. A pilot cannot be COMPLETE while any completion-blocking issue is active.
+
+Before treating any terminal state as current, rerun `app.tools.pilot_status`. It rechecks source confirmation, benchmark authorization, permission, local source/config presence, frozen protocol identity, release/provenance, baseline currency, exact review evidence, and scale-up-decision currency. If one becomes invalid, the old evidence remains readable but current state falls back to a non-terminal state and `pilot_executed` becomes false.
+
+Status separates:
+
+- `BLOCKER`: prevents terminal completion; unknown new reason codes fail closed into this class.
+- `WARNING`: visible but non-blocking, including the mini-pilot sample-size caveat.
+- `INFO`: operational notice, including ignored legacy completion fields.
+
+Restoring current eligibility may restore completion when all referenced evidence is still current. Protocol or evidence changes that invalidate identities require the documented migration/re-review process rather than editing status.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.benchmark.fingerprints import streaming_file_sha256
+from app.benchmark.fingerprints import canonical_sha256, streaming_file_sha256
 from app.benchmark.models import PredictionDocument, VersionMetadata
 from app.benchmark.protocol import current_evaluation_protocol
 from app.dataset.io import write_json_model
@@ -157,7 +157,9 @@ def _completed_workspace(root: Path):
             "git_commit": "a" * 40,
             "git_worktree_dirty": False,
             "resolved_config_hash_sha256": "b" * 64,
-            "production_config_hash_sha256": "c" * 64,
+            "production_config_hash_sha256": canonical_sha256(
+                {"real_clip": {"detector": {}}}
+            ),
             "dataset_fingerprint": "d" * 64,
             "dataset_identity_status": "verified",
             "evaluation_protocol": protocol.model_dump(mode="json"),
@@ -298,7 +300,7 @@ def test_legacy_completion_fields_cannot_bypass_failure_review(
     assert status.pilot_state.value == "FAILURE_REVIEW_REQUIRED"
     assert status.failure_review.required_count == 5
     assert status.failure_review.missing_count == 5
-    assert {
-        "FAILURE_REVIEW_INCOMPLETE",
-        "LEGACY_PILOT_COMPLETION_FIELDS_IGNORED",
-    }.issubset({item.code for item in status.blockers})
+    assert "FAILURE_REVIEW_INCOMPLETE" in {item.code for item in status.blockers}
+    assert "LEGACY_PILOT_COMPLETION_FIELDS_IGNORED" in {
+        item.code for item in status.information
+    }

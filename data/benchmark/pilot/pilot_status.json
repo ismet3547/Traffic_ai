@@ -6,6 +6,7 @@
     {
       "code": "NO_REAL_SOURCE_VIDEO_REGISTERED",
       "details": "No real clip is selected in the pilot manifest; register and explicitly add the first legally usable source video.",
+      "severity": "BLOCKER",
       "video_id": null
     }
   ],
@@ -51,6 +52,7 @@
   },
   "first_agreement_review_completed": false,
   "first_agreement_review_required": false,
+  "information": [],
   "pilot_baseline_frozen": false,
   "pilot_executed": false,
   "pilot_id": "mini-pilot-001",
@@ -69,5 +71,13 @@
   },
   "scale_up_recommendation": "NOT_ASSESSED",
   "scenario_tag_counts": {},
-  "schema_version": "1.1"
+  "schema_version": "1.2",
+  "warnings": [
+    {
+      "code": "MINI_PILOT_ACCURACY_WARNING",
+      "details": "Mini-pilot sample size is too small for production accuracy claims.",
+      "severity": "WARNING",
+      "video_id": null
+    }
+  ]
 }

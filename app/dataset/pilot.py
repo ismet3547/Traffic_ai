@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal
 
+import yaml
 from pydantic import ConfigDict, Field, model_validator
 
 from app.benchmark.annotations import load_annotation as load_benchmark_annotation
@@ -64,7 +65,7 @@ from app.dataset.pilot_review import (
 )
 
 PILOT_MANIFEST_SCHEMA_VERSION: Final = "1.0"
-PILOT_STATUS_SCHEMA_VERSION: Final = "1.1"
+PILOT_STATUS_SCHEMA_VERSION: Final = "1.2"
 PILOT_BASELINE_SCHEMA_VERSION: Final = "1.0"
 MINI_PILOT_ACCURACY_WARNING: Final = (
     "Mini-pilot sample size is too small for production accuracy claims."
@@ -152,10 +153,49 @@ class PilotStageCounts(StrictModel):
     benchmark_complete_clips: int = Field(ge=0)
 
 
-class PilotBlocker(StrictModel):
+class PilotIssueSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    BLOCKER = "BLOCKER"
+
+
+NON_BLOCKING_PILOT_ISSUE_SEVERITIES: Final = {
+    "MINI_PILOT_ACCURACY_WARNING": PilotIssueSeverity.WARNING,
+    "LIMITED_SCENARIO_DIVERSITY": PilotIssueSeverity.WARNING,
+    "LOW_TOTAL_DURATION": PilotIssueSeverity.WARNING,
+    "ANNOTATION_EFFORT_NOT_RECORDED": PilotIssueSeverity.WARNING,
+    "LEGACY_PILOT_COMPLETION_FIELDS_IGNORED": PilotIssueSeverity.INFO,
+}
+
+
+def pilot_issue_severity(code: str) -> PilotIssueSeverity:
+    """Classify one issue; unknown codes fail closed as completion blockers."""
+
+    configured = NON_BLOCKING_PILOT_ISSUE_SEVERITIES.get(code)
+    return configured if configured is not None else PilotIssueSeverity.BLOCKER
+
+
+class PilotIssue(StrictModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     code: str = Field(pattern=r"^[A-Z0-9_]+$")
     details: str
     video_id: str | None = None
+    severity: PilotIssueSeverity = PilotIssueSeverity.BLOCKER
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_central_severity(cls, value: Any) -> Any:
+        if isinstance(value, dict) and isinstance(value.get("code"), str):
+            normalized = dict(value)
+            normalized["severity"] = pilot_issue_severity(value["code"])
+            return normalized
+        return value
+
+
+# Compatibility alias for callers that imported the former model name. Severity
+# is still assigned exclusively by the centralized classifier above.
+PilotBlocker = PilotIssue
 
 
 class PilotState(str, Enum):
@@ -173,8 +213,17 @@ class PilotState(str, Enum):
     COMPLETE_NO_GO = "COMPLETE_NO_GO"
 
 
+TERMINAL_PILOT_STATES: Final = frozenset(
+    {
+        PilotState.COMPLETE_GO,
+        PilotState.COMPLETE_CONDITIONAL_GO,
+        PilotState.COMPLETE_NO_GO,
+    }
+)
+
+
 class PilotStatus(StrictModel):
-    schema_version: Literal["1.1"] = PILOT_STATUS_SCHEMA_VERSION
+    schema_version: Literal["1.2"] = PILOT_STATUS_SCHEMA_VERSION
     pilot_id: str
     pilot_state: PilotState
     real_pilot_status: str
@@ -193,8 +242,30 @@ class PilotStatus(StrictModel):
     scale_up_recommendation: Literal[
         "NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO_GO"
     ] = "NOT_ASSESSED"
-    blockers: list[PilotBlocker]
+    blockers: list[PilotIssue]
+    warnings: list[PilotIssue] = Field(default_factory=list)
+    information: list[PilotIssue] = Field(default_factory=list)
     accuracy_warning: str = MINI_PILOT_ACCURACY_WARNING
+
+    @model_validator(mode="after")
+    def enforce_terminal_invariants(self) -> PilotStatus:
+        all_issues = [*self.blockers, *self.warnings, *self.information]
+        if any(item.severity != pilot_issue_severity(item.code) for item in all_issues):
+            raise ValueError("pilot issue severity differs from central classification")
+        if any(item.severity != PilotIssueSeverity.BLOCKER for item in self.blockers):
+            raise ValueError("pilot blockers must contain only BLOCKER issues")
+        if any(item.severity != PilotIssueSeverity.WARNING for item in self.warnings):
+            raise ValueError("pilot warnings must contain only WARNING issues")
+        if any(item.severity != PilotIssueSeverity.INFO for item in self.information):
+            raise ValueError("pilot information must contain only INFO issues")
+        terminal = self.pilot_state in TERMINAL_PILOT_STATES
+        if terminal and self.blockers:
+            raise ValueError("terminal pilot state cannot coexist with active blockers")
+        if self.pilot_executed != (terminal and not self.blockers):
+            raise ValueError(
+                "pilot_executed must exactly reflect a blocker-free terminal state"
+            )
+        return self
 
 
 class PilotBaselineMetadata(StrictModel):
@@ -492,6 +563,8 @@ def build_pilot_status(
     baseline_frozen = _baseline_metadata_valid(
         baseline_path, manifest.pilot_id, blockers
     )
+    if baseline_frozen:
+        _check_baseline_current_config(manifest, base, baseline_path, blockers)
     if locked_review_eligible and not baseline_frozen:
         blockers.append(
             PilotBlocker(
@@ -643,18 +716,27 @@ def build_pilot_status(
             )
         )
 
+    blockers.append(
+        PilotIssue(
+            code="MINI_PILOT_ACCURACY_WARNING",
+            details=MINI_PILOT_ACCURACY_WARNING,
+        )
+    )
+    issues = _deduplicate_issues(blockers)
+    completion_blockers = [
+        item for item in issues if item.severity == PilotIssueSeverity.BLOCKER
+    ]
+    warnings = [item for item in issues if item.severity == PilotIssueSeverity.WARNING]
+    information = [item for item in issues if item.severity == PilotIssueSeverity.INFO]
     pilot_state = derive_pilot_state(
         counts,
         agreement_review_status,
         baseline_frozen,
         failure_coverage,
         scale_decision_status,
+        has_completion_blocker=bool(completion_blockers),
     )
-    executed = pilot_state in {
-        PilotState.COMPLETE_GO,
-        PilotState.COMPLETE_CONDITIONAL_GO,
-        PilotState.COMPLETE_NO_GO,
-    }
+    executed = pilot_state in TERMINAL_PILOT_STATES and not completion_blockers
     recommendation: Literal["NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO_GO"]
     if scale_decision_status.valid and scale_decision_status.decision is not None:
         recommendation = scale_decision_status.decision.value
@@ -668,10 +750,10 @@ def build_pilot_status(
         real_status = "REAL PILOT STATUS: BLOCKED — SELECTED CLIPS NOT REGISTERED"
     elif executed:
         real_status = f"REAL PILOT STATUS: {pilot_state.value}"
+    elif completion_blockers:
+        real_status = "REAL PILOT STATUS: IN PROGRESS — BLOCKERS PRESENT"
     elif baseline_frozen and review_allowed:
         real_status = "REAL PILOT STATUS: PILOT BASELINE 0 FROZEN"
-    elif blockers:
-        real_status = "REAL PILOT STATUS: IN PROGRESS — BLOCKERS PRESENT"
     else:
         real_status = "REAL PILOT STATUS: READY FOR BASELINE FREEZE"
     return PilotStatus(
@@ -693,7 +775,9 @@ def build_pilot_status(
         failure_review=failure_coverage,
         scale_up_decision=scale_decision_status,
         scale_up_recommendation=recommendation,
-        blockers=_deduplicate_blockers(blockers),
+        blockers=completion_blockers,
+        warnings=warnings,
+        information=information,
     )
 
 
@@ -771,6 +855,20 @@ def render_pilot_status(status: PilotStatus) -> str:
             lines.append(f"- `{blocker.code}`{scope}: {blocker.details}")
     else:
         lines.append("No current workflow blockers.")
+    lines.extend(["", "## Warnings", ""])
+    if status.warnings:
+        for warning in status.warnings:
+            scope = f" ({warning.video_id})" if warning.video_id else ""
+            lines.append(f"- `{warning.code}`{scope}: {warning.details}")
+    else:
+        lines.append("No current warnings.")
+    lines.extend(["", "## Information", ""])
+    if status.information:
+        for notice in status.information:
+            scope = f" ({notice.video_id})" if notice.video_id else ""
+            lines.append(f"- `{notice.code}`{scope}: {notice.details}")
+    else:
+        lines.append("No informational notices.")
     recommendation = status.scale_up_recommendation
     recommendation_detail = (
         "a real end-to-end mini pilot has not yet supplied evidence for a "
@@ -1275,6 +1373,50 @@ def _baseline_metadata_valid(
         return False
 
 
+def _check_baseline_current_config(
+    manifest: PilotManifest,
+    base: Path,
+    baseline_metadata_path: Path,
+    issues: list[PilotIssue],
+) -> None:
+    """Fail completion when current production configs no longer match baseline 0."""
+
+    production_configs: dict[str, Any] = {}
+    for clip in sorted(manifest.clips, key=lambda item: item.video_id):
+        if not clip.production_config_path:
+            return
+        path = _resolve(base, clip.production_config_path)
+        if not path.is_file():
+            return
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                production_configs[clip.video_id] = yaml.safe_load(stream) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            issues.append(
+                PilotIssue(
+                    code="PRODUCTION_CONFIG_INVALID",
+                    details=f"{path}: {exc}",
+                    video_id=clip.video_id,
+                )
+            )
+            return
+    try:
+        metadata = read_json_model(baseline_metadata_path, PilotBaselineMetadata)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return
+    current_hash = canonical_sha256(dict(sorted(production_configs.items())))
+    if current_hash != metadata.production_config_hash_sha256:
+        issues.append(
+            PilotIssue(
+                code="PILOT_BASELINE_STALE",
+                details=(
+                    "Current production configuration content differs from the "
+                    "configuration identity frozen in pilot_baseline_0."
+                ),
+            )
+        )
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
         value = json.load(stream)
@@ -1302,6 +1444,8 @@ def derive_pilot_state(
     baseline_frozen: bool,
     failure_review: FailureReviewCoverage,
     decision: ScaleUpDecisionStatus,
+    *,
+    has_completion_blocker: bool,
 ) -> PilotState:
     if counts.selected_clips == 0:
         return PilotState.PREPARED
@@ -1328,6 +1472,8 @@ def derive_pilot_state(
         return PilotState.AGREEMENT_REVIEW_REQUIRED
     if not decision.valid or decision.decision is None:
         return PilotState.SCALE_UP_DECISION_REQUIRED
+    if has_completion_blocker:
+        return PilotState.BASELINE_FROZEN
     return {
         ScaleUpDecision.GO: PilotState.COMPLETE_GO,
         ScaleUpDecision.CONDITIONAL_GO: PilotState.COMPLETE_CONDITIONAL_GO,
@@ -1335,6 +1481,6 @@ def derive_pilot_state(
     }[decision.decision]
 
 
-def _deduplicate_blockers(blockers: list[PilotBlocker]) -> list[PilotBlocker]:
-    values = {(item.code, item.video_id, item.details): item for item in blockers}
+def _deduplicate_issues(issues: list[PilotIssue]) -> list[PilotIssue]:
+    values = {(item.code, item.video_id, item.details): item for item in issues}
     return [values[key] for key in sorted(values)]

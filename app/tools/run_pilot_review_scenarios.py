@@ -8,7 +8,7 @@ from typing import cast
 
 from app.benchmark.fingerprints import canonical_sha256
 from app.dataset.models import DisagreementType
-from app.dataset.pilot import PilotStageCounts, derive_pilot_state
+from app.dataset.pilot import PilotIssue, PilotStageCounts, derive_pilot_state
 from app.dataset.pilot_review import (
     AgreementReportReference,
     AgreementReviewAction,
@@ -81,7 +81,12 @@ def main() -> int:
         current_dataset_release_sha256=identity.dataset_release_sha256,
     )
     state_a = derive_pilot_state(
-        complete_counts, scenario_c, True, scenario_a, no_decision
+        complete_counts,
+        scenario_c,
+        True,
+        scenario_a,
+        no_decision,
+        has_completion_blocker=False,
     )
 
     decision = build_scale_up_decision_document(
@@ -107,7 +112,12 @@ def main() -> int:
         current_dataset_release_sha256=identity.dataset_release_sha256,
     )
     state_d = derive_pilot_state(
-        complete_counts, scenario_c, True, scenario_b, scenario_d
+        complete_counts,
+        scenario_c,
+        True,
+        scenario_b,
+        scenario_d,
+        has_completion_blocker=False,
     )
 
     changed_identity = _identity("9" * 64)
@@ -122,7 +132,44 @@ def main() -> int:
         current_dataset_release_sha256=changed_identity.dataset_release_sha256,
     )
     state_e = derive_pilot_state(
-        complete_counts, scenario_c, True, changed_failure, scenario_e
+        complete_counts,
+        scenario_c,
+        True,
+        changed_failure,
+        scenario_e,
+        has_completion_blocker=False,
+    )
+    permission_issue = PilotIssue(
+        code="PERMISSION_NOT_VERIFIED",
+        details="Synthetic current-eligibility revocation.",
+    )
+    protocol_issue = PilotIssue(
+        code="PILOT_PROTOCOL_FREEZE_MISMATCH",
+        details="Synthetic current-protocol mismatch.",
+    )
+    permission_revoked_state = derive_pilot_state(
+        complete_counts,
+        scenario_c,
+        True,
+        scenario_b,
+        scenario_d,
+        has_completion_blocker=True,
+    )
+    permission_restored_state = derive_pilot_state(
+        complete_counts,
+        scenario_c,
+        True,
+        scenario_b,
+        scenario_d,
+        has_completion_blocker=False,
+    )
+    protocol_mismatch_state = derive_pilot_state(
+        complete_counts,
+        scenario_c,
+        True,
+        scenario_b,
+        scenario_d,
+        has_completion_blocker=True,
     )
     output = {
         "synthetic": True,
@@ -160,6 +207,33 @@ def main() -> int:
                 "old_go_stale": scenario_e.stale,
                 "failure_reasons": changed_failure.reason_codes,
                 "decision_reasons": scenario_e.reason_codes,
+            },
+        },
+        "terminal_state_lifecycle": {
+            "A": {
+                "expected_state": "COMPLETE_GO",
+                "actual_state": state_d.value,
+                "blockers": [],
+            },
+            "B": {
+                "expected_state": "BASELINE_FROZEN",
+                "actual_state": permission_revoked_state.value,
+                "blockers": [permission_issue.code],
+            },
+            "C": {
+                "expected_state": "COMPLETE_GO",
+                "actual_state": permission_restored_state.value,
+                "blockers": [],
+            },
+            "D": {
+                "expected_state": "BASELINE_FROZEN",
+                "actual_state": protocol_mismatch_state.value,
+                "blockers": [protocol_issue.code],
+            },
+            "E": {
+                "expected_state": "COMPLETE_GO",
+                "actual_state": permission_restored_state.value,
+                "blockers": [],
             },
         },
     }
@@ -253,7 +327,7 @@ def _passed(output: dict[str, object]) -> bool:
     scenario_c = scenarios["C"]
     scenario_d = scenarios["D"]
     scenario_e = scenarios["E"]
-    return bool(
+    review_scenarios_passed = bool(
         scenario_a["expected_state"] == scenario_a["actual_state"]
         and scenario_b["actual_failure_review_complete"] is True
         and scenario_c["actual_agreement_review_complete"] is True
@@ -261,6 +335,11 @@ def _passed(output: dict[str, object]) -> bool:
         and scenario_e["expected_state"] == scenario_e["actual_state"]
         and scenario_e["old_go_stale"] is True
     )
+    lifecycle = cast(dict[str, dict[str, object]], output["terminal_state_lifecycle"])
+    lifecycle_passed = all(
+        item["expected_state"] == item["actual_state"] for item in lifecycle.values()
+    )
+    return review_scenarios_passed and lifecycle_passed
 
 
 if __name__ == "__main__":

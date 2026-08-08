@@ -15,9 +15,14 @@
 - Legitimate-overtaking suppression: unavailable
 - Congestion suppression: unavailable
 - Geometry fail-closed behavior: unavailable
-- Scale-up recommendation: `NOT_ASSESSED`
+- Evidence-bound scale-up decision: not present
+- Failure review coverage: unavailable until `pilot_baseline_0` exists
+- Initial agreement review: not triggered
 
 No production-readiness or real-world accuracy claim is made.
+
+This summary cannot establish completion. Official pilot state is derived from
+the current validated JSON review artifacts and their canonical hashes.
 
 ## Scale-up evidence checklist
 

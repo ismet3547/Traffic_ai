@@ -1,7 +1,14 @@
-# Mini Pilot Failure Summary
+# Mini Pilot Failure Review
 
-**STATUS: NOT EXECUTED — NO LOCKED REAL PILOT BENCHMARK EXISTS**
+Status: **NOT AVAILABLE — PILOT BASELINE 0 IS NOT FROZEN**
 
-No false positives or false negatives are listed because no real pilot benchmark has run. After `pilot_baseline_0` is frozen, inspect every FP and FN and record the failure ID, clip/time, suspected category, human note, safety impact, recurrence likelihood, and candidate generalizable fix.
+No real FP/FN set exists, so no failure review artifact or performance claim is
+present. After baseline freeze, `app.tools.review_pilot_failures` derives the exact
+required set from the frozen benchmark report and regenerates this summary from a
+validated `failure_review.json`.
 
-Do not add clip-specific tuning here as if it were a validated general rule.
+Every FP and FN in the frozen baseline must be accounted for exactly once before
+failure review is complete. Partial, duplicate, unknown, identity-mismatched,
+tampered, and stale review evidence does not count.
+
+> Mini-pilot sample size is too small for production accuracy claims.

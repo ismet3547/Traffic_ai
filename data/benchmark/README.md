@@ -28,6 +28,14 @@ Keep annotation JSON and manifest YAML in Git; keep large or third-party videos 
 
 Phase 4.3 starts with 5–10 legally usable real clips (roughly 10–30 minutes), not the later 30–50 clip scale-up. At present there are zero registered real clips; no real benchmark or accuracy result is claimed. `pilot/mini_pilot_manifest.json` freezes pilot, ontology, handbook, and canonical-agreement identity. `python -m app.tools.pilot_status` derives progress from validated artifacts and reports blockers without treating file names as completion.
 
+Phase 4.3.1 also derives human-review completion from canonical evidence. The
+official files are `pilot/failure_review.json`,
+`pilot/first_agreement_review.json`, and `pilot/scale_up_decision.json`, created
+only through their corresponding tools. Every frozen-baseline FP/FN must appear
+exactly once, the first agreement set is selected deterministically, and all
+three documents become invalid when their referenced evidence changes. Editing
+a manifest completion value cannot advance pilot state.
+
 Use `docs/mini_pilot_operator_checklist.md`. Validation/test clips require blind locked A/B annotation and canonical agreement. Adjudicated GT must be finalized and locked before any model-output review. The first untouched clean benchmark run is preserved with `python -m app.tools.freeze_pilot_baseline`; an existing `pilot_baseline_0` is never overwritten. **Mini-pilot sample size is too small for production accuracy claims.**
 
 ```text

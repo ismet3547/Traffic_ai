@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -45,9 +46,25 @@ from app.dataset.models import (
     StrictModel,
     VideoIntakeRecord,
 )
+from app.dataset.pilot_review import (
+    AgreementReportReference,
+    AgreementReviewStatus,
+    FailureReviewCoverage,
+    ScaleUpDecision,
+    ScaleUpDecisionStatus,
+    assess_failure_review,
+    assess_first_agreement_review,
+    assess_scale_up_decision,
+    derive_required_failures,
+    load_baseline_review_identity,
+    load_optional_failure_review,
+    load_optional_first_agreement_review,
+    load_optional_scale_up_decision,
+    required_agreement_reports,
+)
 
 PILOT_MANIFEST_SCHEMA_VERSION: Final = "1.0"
-PILOT_STATUS_SCHEMA_VERSION: Final = "1.0"
+PILOT_STATUS_SCHEMA_VERSION: Final = "1.1"
 PILOT_BASELINE_SCHEMA_VERSION: Final = "1.0"
 MINI_PILOT_ACCURACY_WARNING: Final = (
     "Mini-pilot sample size is too small for production accuracy claims."
@@ -73,6 +90,9 @@ class PilotArtifactLayout(StrictModel):
     baseline_directory: str = (
         "../../../benchmark_output/mini-pilot-001/pilot_baseline_0"
     )
+    failure_review: str = "failure_review.json"
+    first_agreement_review: str = "first_agreement_review.json"
+    scale_up_decision: str = "scale_up_decision.json"
 
 
 class PilotClipSelection(StrictModel):
@@ -101,11 +121,14 @@ class PilotManifest(StrictModel):
     agreement_protocol: AgreementProtocolIdentity
     frozen_at: datetime
     clips: list[PilotClipSelection] = Field(default_factory=list)
-    first_agreement_review_video_ids: list[str] = Field(default_factory=list)
-    failure_review_completed: bool = False
-    scale_up_recommendation: Literal[
-        "NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO-GO"
-    ] = "NOT_ASSESSED"
+    first_agreement_review_count: int = Field(default=3, ge=3, le=5)
+    # Legacy fields parse for migration only. They are excluded from writes and
+    # never participate in any status or completion decision.
+    first_agreement_review_video_ids: list[str] | None = Field(
+        default=None, exclude=True
+    )
+    failure_review_completed: bool | None = Field(default=None, exclude=True)
+    scale_up_recommendation: str | None = Field(default=None, exclude=True)
     artifacts: PilotArtifactLayout = Field(default_factory=PilotArtifactLayout)
 
     @model_validator(mode="after")
@@ -113,12 +136,6 @@ class PilotManifest(StrictModel):
         video_ids = [item.video_id for item in self.clips]
         if len(video_ids) != len(set(video_ids)):
             raise ValueError("pilot clip video IDs must be unique")
-        if len(self.first_agreement_review_video_ids) != len(
-            set(self.first_agreement_review_video_ids)
-        ):
-            raise ValueError("first agreement review video IDs must be unique")
-        if not set(self.first_agreement_review_video_ids).issubset(video_ids):
-            raise ValueError("agreement-review video IDs must belong to this pilot")
         return self
 
 
@@ -141,9 +158,25 @@ class PilotBlocker(StrictModel):
     video_id: str | None = None
 
 
+class PilotState(str, Enum):
+    PREPARED = "PREPARED"
+    REGISTERING_DATA = "REGISTERING_DATA"
+    ANNOTATING = "ANNOTATING"
+    AGREEMENT_REVIEW_REQUIRED = "AGREEMENT_REVIEW_REQUIRED"
+    ADJUDICATING = "ADJUDICATING"
+    BENCHMARK_READY = "BENCHMARK_READY"
+    BASELINE_FROZEN = "BASELINE_FROZEN"
+    FAILURE_REVIEW_REQUIRED = "FAILURE_REVIEW_REQUIRED"
+    SCALE_UP_DECISION_REQUIRED = "SCALE_UP_DECISION_REQUIRED"
+    COMPLETE_GO = "COMPLETE_GO"
+    COMPLETE_CONDITIONAL_GO = "COMPLETE_CONDITIONAL_GO"
+    COMPLETE_NO_GO = "COMPLETE_NO_GO"
+
+
 class PilotStatus(StrictModel):
-    schema_version: Literal["1.0"] = PILOT_STATUS_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = PILOT_STATUS_SCHEMA_VERSION
     pilot_id: str
+    pilot_state: PilotState
     real_pilot_status: str
     pilot_executed: bool
     counts: PilotStageCounts
@@ -152,10 +185,13 @@ class PilotStatus(StrictModel):
     annotation_effort_mean_minutes_per_pass: float | None = Field(default=None, ge=0)
     first_agreement_review_required: bool
     first_agreement_review_completed: bool
+    first_agreement_review: AgreementReviewStatus
     pilot_baseline_frozen: bool
     posthoc_model_review_allowed: bool
+    failure_review: FailureReviewCoverage
+    scale_up_decision: ScaleUpDecisionStatus
     scale_up_recommendation: Literal[
-        "NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO-GO"
+        "NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO_GO"
     ] = "NOT_ASSESSED"
     blockers: list[PilotBlocker]
     accuracy_warning: str = MINI_PILOT_ACCURACY_WARNING
@@ -222,6 +258,44 @@ def load_pilot_manifest(path: str | Path) -> PilotManifest:
     return read_json_model(path, PilotManifest)
 
 
+def current_required_agreement_reports(
+    manifest: PilotManifest,
+    manifest_path: str | Path,
+) -> list[AgreementReportReference]:
+    """Return the deterministic first-N current canonical agreement identities."""
+
+    base = Path(manifest_path).resolve().parent
+    blockers: list[PilotBlocker] = []
+    registry = _load_registry_status(
+        _resolve(base, manifest.artifacts.registry), blockers
+    )
+    records = {item.video_id: item for item in registry.videos}
+    annotations = _load_annotations(
+        _resolve(base, manifest.artifacts.annotations_directory), blockers
+    )
+    agreements = _load_agreements(
+        _resolve(base, manifest.artifacts.agreements_directory), blockers
+    )
+    valid: list[AgreementReport] = []
+    for video_id in sorted(item.video_id for item in manifest.clips):
+        record = records.get(video_id)
+        documents = annotations.get(video_id, [])
+        reports = agreements.get(video_id, [])
+        if record is None or not validate_double_annotation(record, documents).valid:
+            continue
+        if len(reports) != 1:
+            continue
+        by_id = {item.annotator_id: item for item in documents}
+        report = reports[0]
+        first = by_id.get(report.annotator_a_id)
+        second = by_id.get(report.annotator_b_id)
+        if first is None or second is None:
+            continue
+        if assess_agreement_report(record, first, second, report).valid:
+            valid.append(report)
+    return required_agreement_reports(valid, manifest.first_agreement_review_count)
+
+
 def build_pilot_status(
     manifest: PilotManifest,
     manifest_path: str | Path,
@@ -284,6 +358,7 @@ def build_pilot_status(
 
     agreements = _load_agreements(_resolve(base, layout.agreements_directory), blockers)
     agreement_ready: set[str] = set()
+    valid_agreement_reports: list[AgreementReport] = []
     for video_id in double_ready:
         reports = agreements.get(video_id, [])
         documents = annotations[video_id]
@@ -298,6 +373,7 @@ def build_pilot_status(
                 )
                 if result.valid:
                     agreement_ready.add(video_id)
+                    valid_agreement_reports.append(agreement_report)
 
     adjudications = _load_adjudications(
         _resolve(base, layout.adjudications_directory), blockers
@@ -371,20 +447,38 @@ def build_pilot_status(
             continue
         blockers.append(PilotBlocker(code=code, details=details, video_id=video_id))
 
-    reviewed = set(manifest.first_agreement_review_video_ids)
-    review_required = len(double_ready) >= 3 and not reviewed.issuperset(
-        set(sorted(double_ready)[: min(5, len(double_ready))])
+    required_agreements = required_agreement_reports(
+        valid_agreement_reports, manifest.first_agreement_review_count
     )
-    if review_required:
+    agreement_review_document = _load_review_artifact(
+        _resolve(base, layout.first_agreement_review),
+        load_optional_first_agreement_review,
+        "FIRST_AGREEMENT_REVIEW_INVALID",
+        blockers,
+    )
+    agreement_review_status = assess_first_agreement_review(
+        manifest.pilot_id,
+        required_agreements,
+        agreement_review_document,
+    )
+    if agreement_review_status.required and not agreement_review_status.complete:
         blockers.append(
             PilotBlocker(
                 code="FIRST_AGREEMENT_REVIEW_REQUIRED",
                 details=(
-                    "Pause new annotation after the first 3–5 double-annotated "
-                    "clips and record the agreement review before scaling."
+                    "Pause new annotation and review the deterministic first "
+                    f"{manifest.first_agreement_review_count} current agreement reports."
                 ),
             )
         )
+        for reason in agreement_review_status.reason_codes:
+            if reason != "FIRST_AGREEMENT_REVIEW_REQUIRED":
+                blockers.append(
+                    PilotBlocker(
+                        code=reason,
+                        details="Initial agreement review evidence is not current and exact.",
+                    )
+                )
 
     effort = [
         minutes
@@ -425,27 +519,147 @@ def build_pilot_status(
         inference_complete_clips=len(inference_complete),
         benchmark_complete_clips=len(benchmark_complete),
     )
-    if baseline_frozen and not manifest.failure_review_completed:
+    baseline_identity = None
+    failure_review_document = None
+    failure_coverage = FailureReviewCoverage(
+        required_count=0,
+        reviewed_count=0,
+        missing_count=0,
+        duplicate_count=0,
+        unknown_count=0,
+        stale_count=0,
+        coverage_ratio=0.0,
+        complete=False,
+        artifact_present=False,
+        reason_codes=["PILOT_BASELINE_NOT_FROZEN"],
+        message="Failure review cannot begin until pilot_baseline_0 is frozen.",
+    )
+    if baseline_frozen:
+        try:
+            baseline_identity, frozen_report = load_baseline_review_identity(
+                baseline_path.parent
+            )
+            required_failures = derive_required_failures(
+                baseline_identity, frozen_report
+            )
+            failure_review_document = _load_review_artifact(
+                _resolve(base, layout.failure_review),
+                load_optional_failure_review,
+                "FAILURE_REVIEW_INVALID",
+                blockers,
+            )
+            failure_coverage = assess_failure_review(
+                baseline_identity, required_failures, failure_review_document
+            )
+        except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            blockers.append(
+                PilotBlocker(code="FAILURE_REVIEW_SOURCE_INVALID", details=str(exc))
+            )
+    if baseline_frozen and not failure_coverage.complete:
         blockers.append(
             PilotBlocker(
                 code="FAILURE_REVIEW_INCOMPLETE",
-                details="Every baseline false positive and false negative must be reviewed.",
+                details=failure_coverage.message,
             )
         )
-    if manifest.failure_review_completed and (
-        manifest.scale_up_recommendation == "NOT_ASSESSED"
+        for reason in failure_coverage.reason_codes:
+            if reason != "FAILURE_REVIEW_INCOMPLETE":
+                blockers.append(
+                    PilotBlocker(code=reason, details=failure_coverage.message)
+                )
+    if (
+        baseline_frozen
+        and failure_coverage.complete
+        and not agreement_review_status.required
     ):
         blockers.append(
             PilotBlocker(
-                code="SCALE_UP_RECOMMENDATION_NOT_ASSESSED",
-                details="Record GO, CONDITIONAL GO, or NO-GO with reasons.",
+                code="FIRST_AGREEMENT_REVIEW_NOT_TRIGGERED",
+                details=(
+                    "A scale-up decision requires the configured first-N current "
+                    "agreement-report set; the trigger has not been reached."
+                ),
             )
         )
-    executed = (
-        baseline_frozen
-        and manifest.failure_review_completed
-        and manifest.scale_up_recommendation != "NOT_ASSESSED"
+
+    scale_decision_document = _load_review_artifact(
+        _resolve(base, layout.scale_up_decision),
+        load_optional_scale_up_decision,
+        "SCALE_UP_DECISION_INVALID",
+        blockers,
     )
+    release_path = _resolve(base, layout.dataset_release)
+    current_release_hash = (
+        streaming_file_sha256(release_path) if release_path.is_file() else None
+    )
+    scale_decision_status = assess_scale_up_decision(
+        baseline_identity,
+        failure_coverage,
+        agreement_review_status,
+        failure_review_document,
+        agreement_review_document,
+        scale_decision_document,
+        current_dataset_release_sha256=current_release_hash,
+    )
+    if (
+        baseline_frozen
+        and failure_coverage.complete
+        and agreement_review_status.complete
+        and not scale_decision_status.valid
+    ):
+        blockers.append(
+            PilotBlocker(
+                code="SCALE_UP_DECISION_REQUIRED",
+                details=(
+                    "Record a reasoned scale-up decision bound to the current "
+                    "failure review, agreement review, release, and baseline."
+                ),
+            )
+        )
+        for reason in scale_decision_status.reason_codes:
+            if reason != "SCALE_UP_DECISION_REQUIRED":
+                blockers.append(
+                    PilotBlocker(
+                        code=reason,
+                        details="Scale-up decision evidence is incomplete or stale.",
+                    )
+                )
+
+    if any(
+        value is not None
+        for value in (
+            manifest.failure_review_completed,
+            manifest.first_agreement_review_video_ids,
+            manifest.scale_up_recommendation,
+        )
+    ):
+        blockers.append(
+            PilotBlocker(
+                code="LEGACY_PILOT_COMPLETION_FIELDS_IGNORED",
+                details=(
+                    "Legacy completion fields were loaded for migration but have no "
+                    "authority; current review artifacts determine pilot status."
+                ),
+            )
+        )
+
+    pilot_state = derive_pilot_state(
+        counts,
+        agreement_review_status,
+        baseline_frozen,
+        failure_coverage,
+        scale_decision_status,
+    )
+    executed = pilot_state in {
+        PilotState.COMPLETE_GO,
+        PilotState.COMPLETE_CONDITIONAL_GO,
+        PilotState.COMPLETE_NO_GO,
+    }
+    recommendation: Literal["NOT_ASSESSED", "GO", "CONDITIONAL_GO", "NO_GO"]
+    if scale_decision_status.valid and scale_decision_status.decision is not None:
+        recommendation = scale_decision_status.decision.value
+    else:
+        recommendation = "NOT_ASSESSED"
     if not selected and not registry.videos:
         real_status = NO_REAL_VIDEO_STATUS
     elif not selected:
@@ -453,9 +667,7 @@ def build_pilot_status(
     elif not registered:
         real_status = "REAL PILOT STATUS: BLOCKED — SELECTED CLIPS NOT REGISTERED"
     elif executed:
-        real_status = (
-            f"REAL PILOT STATUS: EXECUTED — SCALE-UP {manifest.scale_up_recommendation}"
-        )
+        real_status = f"REAL PILOT STATUS: {pilot_state.value}"
     elif baseline_frozen and review_allowed:
         real_status = "REAL PILOT STATUS: PILOT BASELINE 0 FROZEN"
     elif blockers:
@@ -464,6 +676,7 @@ def build_pilot_status(
         real_status = "REAL PILOT STATUS: READY FOR BASELINE FREEZE"
     return PilotStatus(
         pilot_id=manifest.pilot_id,
+        pilot_state=pilot_state,
         real_pilot_status=real_status,
         pilot_executed=executed,
         counts=counts,
@@ -472,11 +685,14 @@ def build_pilot_status(
         annotation_effort_mean_minutes_per_pass=(
             sum(effort) / len(effort) if effort else None
         ),
-        first_agreement_review_required=review_required,
-        first_agreement_review_completed=(len(reviewed) >= 3 and not review_required),
+        first_agreement_review_required=agreement_review_status.required,
+        first_agreement_review_completed=agreement_review_status.complete,
+        first_agreement_review=agreement_review_status,
         pilot_baseline_frozen=baseline_frozen,
         posthoc_model_review_allowed=review_allowed,
-        scale_up_recommendation=manifest.scale_up_recommendation,
+        failure_review=failure_coverage,
+        scale_up_decision=scale_decision_status,
+        scale_up_recommendation=recommendation,
         blockers=_deduplicate_blockers(blockers),
     )
 
@@ -487,6 +703,8 @@ def render_pilot_status(status: PilotStatus) -> str:
         f"# Mini Pilot Status — {status.pilot_id}",
         "",
         f"**{status.real_pilot_status}**",
+        "",
+        f"Pilot state: `{status.pilot_state.value}`",
         "",
         f"> {status.accuracy_warning}",
         "",
@@ -506,6 +724,34 @@ def render_pilot_status(status: PilotStatus) -> str:
         (
             "- Post-hoc model review allowed: "
             + ("yes" if status.posthoc_model_review_allowed else "no")
+        ),
+        "",
+        "## Evidence-backed review",
+        "",
+        (
+            "- First agreement review: "
+            f"required={status.first_agreement_review.required}, "
+            f"complete={status.first_agreement_review.complete}, "
+            f"stale={status.first_agreement_review.stale}, "
+            f"required reports={status.first_agreement_review.required_report_count}"
+        ),
+        (
+            "- Failure review: "
+            f"required={status.failure_review.required_count}, "
+            f"reviewed={status.failure_review.reviewed_count}, "
+            f"missing={status.failure_review.missing_count}, "
+            f"duplicate={status.failure_review.duplicate_count}, "
+            f"unknown={status.failure_review.unknown_count}, "
+            f"stale={status.failure_review.stale_count}, "
+            f"complete={status.failure_review.complete}"
+        ),
+        f"- Failure review note: {status.failure_review.message}",
+        (
+            "- Scale-up decision: "
+            f"present={status.scale_up_decision.present}, "
+            f"valid={status.scale_up_decision.valid}, "
+            f"stale={status.scale_up_decision.stale}, "
+            f"decision={status.scale_up_recommendation}"
         ),
         "",
         "## Actual scenario coverage",
@@ -538,6 +784,8 @@ def render_pilot_status(status: PilotStatus) -> str:
             "## Scale-up recommendation",
             "",
             f"`{recommendation}` — {recommendation_detail}",
+            "",
+            "Pilot completion is derived from current review artifacts; legacy manifest completion fields are ignored.",
             "",
             "No TP, FP, FN, precision, recall, F1, or FP/hour values are reported until a locked real pilot baseline exists.",
             "",
@@ -1033,6 +1281,58 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"JSON object required: {path}")
     return value
+
+
+def _load_review_artifact(
+    path: Path,
+    loader: Any,
+    invalid_code: str,
+    blockers: list[PilotBlocker],
+) -> Any:
+    try:
+        return loader(path)
+    except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        blockers.append(PilotBlocker(code=invalid_code, details=f"{path}: {exc}"))
+        return None
+
+
+def derive_pilot_state(
+    counts: PilotStageCounts,
+    agreement_review: AgreementReviewStatus,
+    baseline_frozen: bool,
+    failure_review: FailureReviewCoverage,
+    decision: ScaleUpDecisionStatus,
+) -> PilotState:
+    if counts.selected_clips == 0:
+        return PilotState.PREPARED
+    if counts.registered_clips < counts.selected_clips:
+        return PilotState.REGISTERING_DATA
+    if counts.double_annotated_clips < counts.selected_clips:
+        return PilotState.ANNOTATING
+    if agreement_review.required and not agreement_review.complete:
+        return PilotState.AGREEMENT_REVIEW_REQUIRED
+    if counts.adjudicated_clips < counts.selected_clips:
+        return PilotState.ADJUDICATING
+    if (
+        counts.benchmark_exported_clips < counts.selected_clips
+        or counts.inference_complete_clips < counts.selected_clips
+        or counts.benchmark_complete_clips < counts.selected_clips
+        or not baseline_frozen
+    ):
+        return PilotState.BENCHMARK_READY
+    if not failure_review.complete:
+        return PilotState.FAILURE_REVIEW_REQUIRED
+    if not agreement_review.required:
+        return PilotState.BASELINE_FROZEN
+    if not agreement_review.complete:
+        return PilotState.AGREEMENT_REVIEW_REQUIRED
+    if not decision.valid or decision.decision is None:
+        return PilotState.SCALE_UP_DECISION_REQUIRED
+    return {
+        ScaleUpDecision.GO: PilotState.COMPLETE_GO,
+        ScaleUpDecision.CONDITIONAL_GO: PilotState.COMPLETE_CONDITIONAL_GO,
+        ScaleUpDecision.NO_GO: PilotState.COMPLETE_NO_GO,
+    }[decision.decision]
 
 
 def _deduplicate_blockers(blockers: list[PilotBlocker]) -> list[PilotBlocker]:

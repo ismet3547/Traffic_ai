@@ -19,7 +19,11 @@
     "app/tools/run_agreement_integrity_scenarios.py",
     "app/tools/run_agreement_protocol_scenarios.py",
     "app/tools/pilot_status.py",
-    "app/tools/freeze_pilot_baseline.py"
+    "app/tools/freeze_pilot_baseline.py",
+    "app/tools/review_pilot_failures.py",
+    "app/tools/review_initial_agreement.py",
+    "app/tools/record_scale_up_decision.py",
+    "app/tools/run_pilot_review_scenarios.py"
   ],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic",

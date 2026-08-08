@@ -551,6 +551,26 @@ python -m app.tools.freeze_pilot_baseline --manifest data/benchmark/pilot/mini_p
 
 Only a frozen baseline authorizes post-hoc FP/FN review. It does not authorize tuning on validation clips or a production-accuracy claim. **Mini-pilot sample size is too small for production accuracy claims.**
 
+### Phase 4.3.1 evidence-backed pilot review
+
+Pilot completion is derived from review artifacts; it cannot be declared by editing a status flag. Legacy manifest values named `failure_review_completed`, `first_agreement_review_video_ids`, or `scale_up_recommendation` are accepted only for migration, ignored by the decision path, omitted on rewrite, and reported as `LEGACY_PILOT_COMPLETION_FIELDS_IGNORED`.
+
+Three canonical, atomically written documents form the review chain:
+
+1. `FailureReviewDocument` binds every review to the canonical SHA-256 of the frozen benchmark report plus its dataset fingerprint, evaluation fingerprint, baseline ID, and system commit. Failure IDs are semantic canonical hashes, not list positions. **Every FP and FN in the frozen baseline must be accounted for exactly once before failure review is complete.** Missing, duplicate, unknown, identity-mismatched, tampered, or stale entries fail coverage. A zero-failure baseline auto-completes only this stage with “No FP/FN review required for this baseline”; it does not imply production quality.
+2. `FirstAgreementReviewDocument` binds the review to the exact first N (configured 3–5, default 3) current canonical `AgreementReport` identities selected deterministically by `video_id`. Annotation, agreement protocol, or report revisions make it stale. A handbook-revision action must reference stable IDs from `handbook_issues.md`.
+3. `ScaleUpDecisionDocument` records the human `GO`, `CONDITIONAL_GO`, or `NO_GO` judgment and rationale while binding it to the current baseline, release, benchmark report, failure-review hash, and agreement-review hash. `CONDITIONAL_GO` requires conditions; `NO_GO` requires blockers. Any evidence change invalidates the decision.
+
+```powershell
+python -m app.tools.review_pilot_failures --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json
+python -m app.tools.review_pilot_failures --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json --reviews data/benchmark/pilot/work/failure_reviews.json
+python -m app.tools.review_initial_agreement --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json --summary data/benchmark/pilot/work/first_agreement_summary.json
+python -m app.tools.record_scale_up_decision --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json --decision GO --rationale "REPLACE_WITH_EVIDENCE_BASED_RATIONALE"
+python -m app.tools.run_pilot_review_scenarios
+```
+
+The status command reports the explicit pilot state and nested baseline, agreement-review, failure-coverage, and decision validity. The terminal states are `COMPLETE_GO`, `COMPLETE_CONDITIONAL_GO`, and `COMPLETE_NO_GO`; none is reachable from a manifest checkbox. Post-hoc tools expose model failures only after the existing locked-GT and immutable-baseline gates.
+
 ## Tests and checks
 
 Tests use synthetic geometry, fake detections/tracks, and fake video writers; they do not download YOLO weights:

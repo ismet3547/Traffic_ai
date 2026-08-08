@@ -20,17 +20,18 @@
     "benchmark_manifest": "benchmark_manifest.yaml",
     "benchmark_run_directory": "../../../benchmark_output/mini-pilot-001/current_run",
     "dataset_release": "dataset_release.json",
+    "failure_review": "failure_review.json",
+    "first_agreement_review": "first_agreement_review.json",
     "ground_truth_directory": "ground_truth",
-    "registry": "../intake_registry.json"
+    "registry": "../intake_registry.json",
+    "scale_up_decision": "scale_up_decision.json"
   },
   "clips": [],
   "dataset_version": "pilot-0.1",
-  "failure_review_completed": false,
-  "first_agreement_review_video_ids": [],
+  "first_agreement_review_count": 3,
   "frozen_at": "2026-08-08T00:00:00Z",
   "handbook_version": "1.0",
   "ontology_version": "pilot-1",
   "pilot_id": "mini-pilot-001",
-  "scale_up_recommendation": "NOT_ASSESSED",
   "schema_version": "1.0"
 }

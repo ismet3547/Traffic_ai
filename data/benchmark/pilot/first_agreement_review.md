@@ -2,13 +2,15 @@
 
 Status: **NOT STARTED — NO REAL DOUBLE-ANNOTATED CLIPS**
 
-After the first 3–5 real clips are independently annotated and locked, stop and record:
+This prose file is informational only. Official completion requires
+`first_agreement_review.json`, created by:
 
-- clip IDs reviewed;
-- overall and positive-event agreement;
-- label, boundary, missing-event, confidence, and vehicle-reference disagreements;
-- recurring causes;
-- handbook issues opened;
-- whether annotation may continue under the frozen handbook.
+```powershell
+python -m app.tools.review_initial_agreement `
+  --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json `
+  --summary data/benchmark/pilot/work/first_agreement_summary.json
+```
 
-Then add exactly those reviewed clip IDs to `first_agreement_review_video_ids` in `mini_pilot_manifest.json`.
+The system selects the configured first N valid canonical reports by `video_id`
+and binds the review to every exact agreement ID and content SHA-256. A hand-edited
+video-ID list cannot satisfy this gate.

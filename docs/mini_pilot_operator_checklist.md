@@ -130,7 +130,15 @@ python -m app.tools.compare_annotations `
   --output data/benchmark/pilot/agreements/mini_pilot_001_clip_001.json
 ```
 
-After the first 3–5 double-annotated clips, stop. Review overall and positive-event agreement plus label, boundary, missing-event, confidence, and vehicle-reference disagreements. Record findings in `first_agreement_review.md` and `handbook_issues.md`; add reviewed IDs to the pilot manifest only after this review is complete.
+After the configured first-review count (3–5, default 3) has current canonical reports, stop. The system deterministically selects the first N valid reports by `video_id`; operators cannot cherry-pick clips. Prepare a structured summary JSON and create the provenance-bound review:
+
+```powershell
+python -m app.tools.review_initial_agreement `
+  --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json `
+  --summary data/benchmark/pilot/work/first_agreement_summary.json
+```
+
+The summary records recurring disagreement categories, optional `handbook_issue_ids`, an action, and notes. `HANDBOOK_REVISION` requires at least one issue ID. Completion requires every exact `agreement_id` and `agreement_content_sha256`; annotation or protocol revisions make the artifact stale.
 
 If the handbook changes, bump its version, record the change, identify affected clips, and re-review them consistently. Never mix incompatible semantics silently.
 
@@ -219,7 +227,24 @@ python -m app.tools.inspect_failures `
   --limit 10000
 ```
 
-Review every FP and FN. In `pilot_failure_summary.md`, record a brief human note and suspected category such as detector miss, ID switch, lane assignment, right-lane opportunity, overtaking policy, congestion, geometry gate, lifecycle, or GT ambiguity. Rank patterns by safety impact, frequency, likely recurrence, and fixability.
+First enumerate the immutable required set without writing completion evidence:
+
+```powershell
+python -m app.tools.review_pilot_failures `
+  --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json
+```
+
+Review every FP and FN, then supply a structured JSON review list with the exact deterministic failure IDs and their copied semantic identity fields:
+
+```powershell
+python -m app.tools.review_pilot_failures `
+  --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json `
+  --reviews data/benchmark/pilot/work/failure_reviews.json
+```
+
+Each entry requires a controlled category, note, severity, systematic-risk assessment, and proposed action. The command refuses partial, duplicate, unknown, identity-mismatched, tampered, or stale evidence and generates `pilot_failure_summary.md` from validated coverage. A zero-FP/zero-FN baseline needs no artificial review artifact and is explicitly reported as “No FP/FN review required for this baseline.”
+
+**Every FP and FN in the frozen baseline must be accounted for exactly once before failure review is complete.**
 
 Do not fix one clip opportunistically. Any proposed change must state the repeated failure pattern, general rule, affected development clips, and regression risk. Tune only on development clips; do not reuse validation results as unbiased evidence after tuning.
 
@@ -235,6 +260,16 @@ Update:
 
 Always report raw TP/FP/FN alongside precision, recall, F1, and FP/hour. Include legitimate-overtaking suppression, congestion suppression, and geometry fail-closed observations with denominators. Keep the warning: **Mini-pilot sample size is too small for production accuracy claims.**
 
-Choose `GO`, `CONDITIONAL GO`, or `NO-GO` only after evaluating ontology stability, annotator understanding, recurring disagreement manageability, release tooling, end-to-end benchmark operation, failure interpretability, dataset integrity, and whether failures form actionable patterns.
+Choose `GO`, `CONDITIONAL_GO`, or `NO_GO` only after evaluating ontology stability, annotator understanding, recurring disagreement manageability, release tooling, end-to-end benchmark operation, failure interpretability, dataset integrity, and whether failures form actionable patterns. Record that human judgment as an evidence-bound artifact:
 
-After every FP/FN has a human note, set `failure_review_completed` to `true` in the pilot manifest. Set `scale_up_recommendation` only after documenting the reasons in all three summaries. The status tool does not mark the pilot executed until the immutable baseline, complete failure review, and an explicit scale-up recommendation all exist.
+```powershell
+python -m app.tools.record_scale_up_decision `
+  --pilot-manifest data/benchmark/pilot/mini_pilot_manifest.json `
+  --decision GO `
+  --rationale "REPLACE_WITH_EVIDENCE_BASED_RATIONALE" `
+  --known-limitation "Mini-pilot evidence does not establish production accuracy."
+```
+
+Use one or more `--condition` values for `CONDITIONAL_GO`; use one or more `--known-blocker` values for `NO_GO`. The command refuses missing/stale baseline, failure-review, agreement-review, release, or benchmark evidence. Any referenced artifact change invalidates the old decision.
+
+**Pilot completion is derived from review artifacts; it cannot be declared by editing a status flag.** Legacy `failure_review_completed`, `first_agreement_review_video_ids`, and `scale_up_recommendation` manifest values are ignored and reported as migration blockers.

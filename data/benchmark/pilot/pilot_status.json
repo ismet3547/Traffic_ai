@@ -21,14 +21,53 @@
     "selected_clips": 0,
     "total_duration_seconds": 0.0
   },
+  "failure_review": {
+    "artifact_content_sha256": null,
+    "artifact_present": false,
+    "complete": false,
+    "coverage_ratio": 0.0,
+    "duplicate_count": 0,
+    "message": "Failure review cannot begin until pilot_baseline_0 is frozen.",
+    "missing_count": 0,
+    "reason_codes": [
+      "PILOT_BASELINE_NOT_FROZEN"
+    ],
+    "required_count": 0,
+    "reviewed_count": 0,
+    "stale_count": 0,
+    "unknown_count": 0
+  },
+  "first_agreement_review": {
+    "artifact_content_sha256": null,
+    "artifact_present": false,
+    "complete": false,
+    "missing_count": 0,
+    "reason_codes": [],
+    "required": false,
+    "required_report_count": 0,
+    "reviewed_report_count": 0,
+    "stale": false,
+    "unknown_count": 0
+  },
   "first_agreement_review_completed": false,
   "first_agreement_review_required": false,
   "pilot_baseline_frozen": false,
   "pilot_executed": false,
   "pilot_id": "mini-pilot-001",
+  "pilot_state": "PREPARED",
   "posthoc_model_review_allowed": false,
   "real_pilot_status": "REAL PILOT STATUS: BLOCKED — NO REAL SOURCE VIDEO REGISTERED",
+  "scale_up_decision": {
+    "artifact_content_sha256": null,
+    "decision": null,
+    "present": false,
+    "reason_codes": [
+      "SCALE_UP_DECISION_REQUIRED"
+    ],
+    "stale": false,
+    "valid": false
+  },
   "scale_up_recommendation": "NOT_ASSESSED",
   "scenario_tag_counts": {},
-  "schema_version": "1.0"
+  "schema_version": "1.1"
 }

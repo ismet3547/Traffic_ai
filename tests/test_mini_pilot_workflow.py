@@ -121,6 +121,38 @@ def _completed_workspace(root: Path):
             "f1": 2 / 7,
             "false_positives_per_video_hour": 2.0,
         },
+        "failures": [
+            *[
+                {
+                    "failure_id": f"fp_{index:04d}",
+                    "video_id": "real_clip",
+                    "kind": "false_positive",
+                    "timestamp_seconds": float(index),
+                    "ground_truth": None,
+                    "prediction": {
+                        "event_id": f"prediction_{index}",
+                        "start_seconds": float(index),
+                        "end_seconds": float(index) + 1.0,
+                    },
+                }
+                for index in range(1, 3)
+            ],
+            *[
+                {
+                    "failure_id": f"fn_{index:04d}",
+                    "video_id": "real_clip",
+                    "kind": "false_negative",
+                    "timestamp_seconds": float(index + 2),
+                    "ground_truth": {
+                        "event_id": f"truth_{index}",
+                        "start_seconds": float(index + 2),
+                        "end_seconds": float(index + 3),
+                    },
+                    "prediction": None,
+                }
+                for index in range(1, 4)
+            ],
+        ],
         "reproducibility": {
             "git_commit": "a" * 40,
             "git_worktree_dirty": False,
@@ -229,6 +261,9 @@ def test_pilot_baseline_is_frozen_once_and_metadata_is_preserved(
     assert status.posthoc_model_review_allowed
     assert not status.pilot_executed
     assert "FAILURE_REVIEW_INCOMPLETE" in {item.code for item in status.blockers}
+    rendered = render_pilot_status(status)
+    assert "required=5, reviewed=0, missing=5" in rendered
+    assert "Every FP and FN" in rendered
     with pytest.raises(PilotBaselineExistsError):
         freeze_pilot_baseline(manifest, manifest_path, frozen_at=FROZEN_AT)
     assert (destination / "baseline_metadata.json").read_bytes() == original
@@ -242,3 +277,28 @@ def test_pilot_status_and_rendering_are_deterministic(tmp_path: Path) -> None:
 
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
     assert render_pilot_status(first) == render_pilot_status(second)
+
+
+def test_legacy_completion_fields_cannot_bypass_failure_review(
+    tmp_path: Path,
+) -> None:
+    manifest, manifest_path, _, _ = _completed_workspace(tmp_path)
+    freeze_pilot_baseline(manifest, manifest_path, frozen_at=FROZEN_AT)
+    forged = manifest.model_copy(
+        update={
+            "failure_review_completed": True,
+            "first_agreement_review_video_ids": ["real_clip"],
+            "scale_up_recommendation": "GO",
+        }
+    )
+
+    status = build_pilot_status(forged, manifest_path)
+
+    assert not status.pilot_executed
+    assert status.pilot_state.value == "FAILURE_REVIEW_REQUIRED"
+    assert status.failure_review.required_count == 5
+    assert status.failure_review.missing_count == 5
+    assert {
+        "FAILURE_REVIEW_INCOMPLETE",
+        "LEGACY_PILOT_COMPLETION_FIELDS_IGNORED",
+    }.issubset({item.code for item in status.blockers})
